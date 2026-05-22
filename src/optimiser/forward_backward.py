@@ -61,10 +61,10 @@ class ForwardBackward(Optimiser):
         # cuda event
         self._forward_cuda_timing = False
         self._backward_cuda_timing = False
-        if self._meas_op.get_device() == torch.device("cuda"):
-            self._forward_cuda_timing = True
-        if self._prox_op.get_device() == torch.device("cuda"):
-            self._backward_cuda_timing = True
+        # if self._meas_op.get_device() == torch.device("cuda"):
+        #     self._forward_cuda_timing = True
+        # if self._prox_op.get_device() == torch.device("cuda"):
+        #     self._backward_cuda_timing = True
 
         # save dirty image and psf
         self._meas_bp = self._meas_op_precise.adjoint_op(self._meas).to(
@@ -105,48 +105,54 @@ class ForwardBackward(Optimiser):
             self._t_iter = timer()
             self._each_iter_begin()
 
-            # forward step
-            if self._forward_cuda_timing:
-                forward_start_event.record()
-            else:
-                self._t_forward = timer()
-            x_hat = self._model - self._gd_step_size * (
-                self._meas_op.adjoint_op(self._meas_op.forward_op(self._model))
-                - self._meas_bp
-            )
-            x_hat = x_hat.to(
-                device=self._prox_op.get_device(), dtype=self._prox_op.get_data_type()
-            )
-            if self._forward_cuda_timing:
-                forward_end_event.record()
-                torch.cuda.synchronize()
-                self._t_forward = forward_start_event.elapsed_time(forward_end_event) / 1e3
-            else:
-                self._t_forward = timer() - self._t_forward
+            # --- forward step ---
+            with torch.cuda.nvtx.range(f"Forward_Iter_{self._iter}"):
+                if self._forward_cuda_timing:
+                    forward_start_event.record()
+                else:
+                    self._t_forward = timer()
+                
+                with torch.cuda.nvtx.range("x_hat_computation"):
+                    x_hat = self._model - self._gd_step_size * (
+                        self._meas_op.adjoint_op(self._meas_op.forward_op(self._model))
+                        - self._meas_bp
+                    )
+                
+                with torch.cuda.nvtx.range("x_hat_to"):
+                    x_hat = x_hat.to(
+                        device=self._prox_op.get_device(), dtype=self._prox_op.get_data_type()
+                    )
+                if self._forward_cuda_timing:
+                    forward_end_event.record()
+                    torch.cuda.synchronize()
+                    self._t_forward = forward_start_event.elapsed_time(forward_end_event) / 1e3
+                else:
+                    self._t_forward = timer() - self._t_forward
 
-            # backward step
-            if self._backward_cuda_timing:
-                backward_start_event.record()
-            else:
-                self._t_backward = timer()
-            self._model = self._prox_op(x_hat)
-            self._model = self._model.to(device=self._meas_op.get_device()).to(
-                dtype=self._meas_op.get_data_type()
-            )
-            if self._backward_cuda_timing:
-                backward_end_event.record()
-                torch.cuda.synchronize()
-                self._t_backward = backward_start_event.elapsed_time(backward_end_event) / 1e3
-            else:
-                self._t_backward = timer() - self._t_backward
-            self._t_iter = timer() - self._t_iter
+            # --- backward step ---
+            with torch.cuda.nvtx.range(f"Backward_Iter_{self._iter}"):
+                if self._backward_cuda_timing:
+                    backward_start_event.record()
+                else:
+                    self._t_backward = timer()
+                self._model = self._prox_op(x_hat)
+                self._model = self._model.to(device=self._meas_op.get_device()).to(
+                    dtype=self._meas_op.get_data_type()
+                )
+                if self._backward_cuda_timing:
+                    backward_end_event.record()
+                    torch.cuda.synchronize()
+                    self._t_backward = backward_start_event.elapsed_time(backward_end_event) / 1e3
+                else:
+                    self._t_backward = timer() - self._t_backward
+                self._t_iter = timer() - self._t_iter
 
-            if self._stop_criteria():
-                break
+                if self._stop_criteria():
+                    break
 
-            self._each_iter_end()
+                self._each_iter_end()
 
-            self._model_prev = self._model
+                self._model_prev = self._model
 
         self._t_total = timer() - self._t_total
 

@@ -1,0 +1,79 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: mrop-profile-imager-
+  labels:
+    kueue.x-k8s.io/queue-name: eidf018ns-user-queue
+    eidf/user: s2908448-aspp
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 120
+  template:
+    metadata:
+      labels:
+        eidf/user: s2908448-aspp
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 3607
+      containers:
+      - name: python-worker
+        stdin: true
+        image: taylorlorlor/mrop
+        imagePullPolicy: Always
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          cd /mnt/pvc/diss/Small-scale-RI-imaging
+          export PATH="$(pwd)/nsys_bin/opt/nvidia/nsight-systems-cli/2026.2.1/target-linux-x64:$PATH"
+          mkdir -p logs
+          RUN_TIME=$(date +%Y%m%d_%H%M%S)
+          LOG_FILE="logs/profiling_run_${RUN_TIME}.log"
+
+          # --- 1. PROFILE CLASSICAL IMAGING ---
+          echo "=== Starting Profiling: Classical Config ===" > "$LOG_FILE" 2>&1
+          nsys profile \
+            --trace=cuda,nvtx \
+            --output="logs/nsys_classical_${RUN_TIME}" \
+            --export=sqlite \
+            --force-overwrite=true \
+            python run_imager.py -c "src/mrop_ri_measurement_operator/config/imaging/usara_classical.json" >> "$LOG_FILE" 2>&1
+          
+          # --- 2. PROFILE MROP IMAGING ---
+          echo -e "\n=== Starting Profiling: MROP Config ===" >> "$LOG_FILE" 2>&1
+          nsys profile \
+            --trace=cuda,nvtx \
+            --output="logs/nsys_mrop_${RUN_TIME}" \
+            --export=sqlite \
+            --force-overwrite=true \
+            python run_imager.py -c "src/mrop_ri_measurement_operator/config/imaging/usara_mrop.json" >> "$LOG_FILE" 2>&1
+        resources:
+          requests:
+            cpu: 32
+            memory: '32Gi'
+          limits:
+            cpu: 32
+            memory: '32Gi'
+            nvidia.com/gpu: 1
+        volumeMounts:
+          - mountPath: /mnt/pvc
+            name: volume
+          - mountPath: /mnt/shared
+            name: volume2
+          - mountPath: /dev/shm
+            name: dshm
+      imagePullSecrets:
+        - name: eidfreg
+      volumes:
+        - name: volume
+          persistentVolumeClaim:
+            claimName: s2908448-aspp-pvc
+        - name: volume2
+          persistentVolumeClaim:
+            claimName: mlas-shared-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3

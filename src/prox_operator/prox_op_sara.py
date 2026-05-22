@@ -178,6 +178,7 @@ class ProxOpSARAPos(ProxOp):
             )
         )
 
+    @torch.compile 
     def _sfth_dual(self, psit_img: WaveletDictCoeff) -> None:
         """
         Applies soft thresholding to `psit_img` and update the dual variable.
@@ -226,30 +227,35 @@ class ProxOpSARAPos(ProxOp):
         obj_val_prev = -1
         for i in range(self._max_iter):
             # primal update
-            result = torch.maximum(
-                x - self._waverec2_dict(self._dual),
-                torch.zeros(
-                    1,
-                    1,
-                    device=self._device,
-                    dtype=self._dtype,
-                ),
-            )
-            norm_l2 = torch.sum((result - x) ** 2)
-            # dual update
-            self._sfth_dual(self._wavedec2_dict(result))
-            # stop criterion
-            obj_val = 0.5 * norm_l2.item() + self._sfth_val * self._norm_l1.item()
-            obj_rel_var = abs(obj_val - obj_val_prev) / obj_val
-            obj_val_prev = obj_val
-            if self._verbose > 1:
-                print(
-                    f"  Prox Iter {i+1}, prox_fval = {obj_val},",
-                    f"rel_fval = {obj_rel_var}, l1norm_w = {self._norm_l1.item()}",
-                    flush=True,
+            with torch.cuda.nvtx.range("primal_update"):
+                result = torch.maximum(
+                    x - self._waverec2_dict(self._dual),
+                    torch.zeros(
+                        1,
+                        1,
+                        device=self._device,
+                        dtype=self._dtype,
+                    ),
                 )
-            if obj_rel_var < self._obj_tol:
-                break
+                norm_l2 = torch.sum((result - x) ** 2)
+                
+            # dual update
+            with torch.cuda.nvtx.range("dual_update"):
+                self._sfth_dual(self._wavedec2_dict(result))
+            
+            # stop criterion
+            with torch.cuda.nvtx.range("stop_criterion"):
+                obj_val = 0.5 * norm_l2.item() + self._sfth_val * self._norm_l1.item()
+                obj_rel_var = abs(obj_val - obj_val_prev) / obj_val
+                obj_val_prev = obj_val
+                if self._verbose > 1:
+                    print(
+                        f"  Prox Iter {i+1}, prox_fval = {obj_val},",
+                        f"rel_fval = {obj_rel_var}, l1norm_w = {self._norm_l1.item()}",
+                        flush=True,
+                    )
+                if obj_rel_var < self._obj_tol:
+                    break
         if self._verbose:
             print(
                 f"  Prox converged: Iter {i+1}, rel_fval = {obj_rel_var},",
