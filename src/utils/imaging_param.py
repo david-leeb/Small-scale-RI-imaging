@@ -38,6 +38,7 @@ def set_imaging_params_ri(
     param_optimiser["s3_bucket_name"] = param_general.get("s3_bucket_name", None)
     param_optimiser["tmp_dir"] = param_general.get("tmp_dir", None)
     param_optimiser["src_name"] = param_general.get("src_name", None)
+    param_optimiser["regen_obs_nfreqs"] = param_general.get("regen_obs_nfreqs", False)
     # set default values
     param_optimiser["flag_imaging"] = param_general.get("flag_imaging", True)
     param_proxop["verbose"] = param_general.get("verbose", True)
@@ -66,6 +67,9 @@ def set_imaging_params_ri(
         param_measop["dm_shift"] = int(param_general["dm_shift"])
     else:
         param_measop["dm_shift"] = 0
+        
+    param_measop["nfreqs"] = param_general.get("nfreqs", None)
+    param_measop["freq_num"] = param_general.get("freq_num", None)
 
     # image pixel size
     if param_general.get("im_pixel_size", None) and param_general["im_pixel_size"] > 0.0:
