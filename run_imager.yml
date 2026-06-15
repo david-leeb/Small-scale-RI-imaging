@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: mrop-run-imager-
+  labels:
+    kueue.x-k8s.io/queue-name: eidf018ns-user-queue
+    eidf/user: s2908448-aspp
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 120
+  template:
+    metadata:
+      labels:
+        eidf/user: s2908448-aspp
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 3607
+      containers:
+      - name: python-worker
+        stdin: true
+        image: davidleeb24/mrop:v3
+        imagePullPolicy: Always
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          cd /mnt/pvc/diss/Small-scale-RI-imaging-mrop
+          mkdir -p logs
+          LOG_FILE="logs/output_$(date +%Y%m%d_%H%M%S).log"
+          
+          echo -e "\n=== Starting MROP Imaging ===" >> "$LOG_FILE" 2>&1
+          python run_imager_3c273.py -c "config/3C273_central_16chs_512.json" >> "$LOG_FILE" 2>&1
+        resources:
+          requests:
+            cpu: 32
+            memory: '32Gi'
+          limits:
+            cpu: 32
+            memory: '32Gi'
+            nvidia.com/gpu: 1
+        volumeMounts:
+          - mountPath: /mnt/pvc
+            name: volume
+          - mountPath: /mnt/shared
+            name: volume2
+          - mountPath: /dev/shm
+            name: dshm
+      imagePullSecrets:
+        - name: eidfreg
+      volumes:
+        - name: volume
+          persistentVolumeClaim:
+            claimName: s2908448-aspp-pvc
+        - name: volume2
+          persistentVolumeClaim:
+            claimName: mlas-shared-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3

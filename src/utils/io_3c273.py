@@ -81,7 +81,6 @@ def load_data_to_tensor(
                 os.path.join(data_path, f"273-X08_data_ch_{i_f+1}.mat"), variable_names=["data_I"]
             )
             num_data += data_tmp["data_I"].size
-
         data["u"] = np.zeros((1, 1, num_data), dtype=np.float64)
         data["v"] = np.zeros((1, 1, num_data), dtype=np.float64)
         data["y"] = np.zeros((1, 1, num_data), dtype=np.complex128)
@@ -156,10 +155,12 @@ def load_data_to_tensor(
     )
     data["super_resolution"] = super_resolution
 
+    # Cast to correct datatype given in config file
+    dtype_complex = torch.complex64 if dtype == torch.float32 else torch.complex128
     data["u"] = torch.tensor(data["u"], dtype=dtype, device=device).view(1, 1, -1)
     data["v"] = -torch.tensor(data["v"], dtype=dtype, device=device).view(1, 1, -1)
-    data["y"] = torch.tensor(data["y"], dtype=torch.complex128, device=device).view(1, 1, -1)
-    data["nW"] = torch.tensor(data["nW"], dtype=torch.complex128, device=device).view(1, 1, -1)
+    data["y"] = torch.tensor(data["y"], dtype=dtype_complex, device=device).view(1, 1, -1)
+    data["nW"] = torch.tensor(data["nW"], dtype=dtype_complex, device=device).view(1, 1, -1)
     halfSpatialBandwidth = (180.0 / np.pi) * 3600.0 / (image_pixel_size) / 2.0
 
     data["u"] = data["u"] * np.pi / halfSpatialBandwidth

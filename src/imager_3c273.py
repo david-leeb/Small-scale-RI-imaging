@@ -6,8 +6,13 @@ from typing import Dict
 import torch
 import numpy as np
 from astropy.io import fits
+import nvtx
 
-from .prox_operator import ProxOpAIRI, ProxOpElipse, ProxOpSARAPos
+torch.set_float32_matmul_precision('high')
+torch.cuda.reset_peak_memory_stats()
+torch.cuda.empty_cache()
+
+from .prox_operator import ProxOpAIRI, ProxOpElipse, ProxOpSARAPos, ProxOpSARAPos_original
 from .optimiser import FBAIRI, PDAIRI, FBSARA
 from .utils import gen_imaging_weight
 # from .ri_measurement_operator.pysrc.utils.io import load_data_to_tensor
@@ -58,8 +63,8 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         # verbose=param_optimiser["verbose"],
     )
     
-    if data["nFreqs"] == 1:
-        data["flag"] = data["flag"][:, 0, :].unsqueeze(1)
+    # if data["nFreqs"] == 1:
+    #     data["flag"] = data["flag"][:, 0, :].unsqueeze(1)
 
     if param_measop["use_ROP"]:
         assert param_measop["use_BDA"] is False, "BDA cannot be used with ROP"
@@ -85,14 +90,10 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
 
     meas_op = None
 
-    from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import (
-        MeasOpPytorchFinufft,
-    )
-
     if not param_measop["use_ROP"]:
+        from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft
         nufft_op = MeasOpPytorchFinufft
     else:
-        from .mrop_ri_measurement_operator import create_meas_op_ROP_vmap as create_meas_op_ROP
         # if param_measop["ROP_param"]["ROP_batchwise"]:
         #     if param_optimiser.get("nfreqs", data["nFreqs"]) in [None, 1]:
         #         from .mrop_ri_measurement_operator import create_meas_op_ROP_batchwise as create_meas_op_ROP
@@ -113,6 +114,12 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         # else:
         #     from .mrop_ri_measurement_operator import create_meas_op_ROP
 
+        if param_measop["ROP_param"]["ROP_vmap"]:
+            from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft_original import MeasOpPytorchFinufft
+            from .mrop_ri_measurement_operator import create_meas_op_ROP_vmap as create_meas_op_ROP
+        else:
+            from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft
+            from .mrop_ri_measurement_operator import create_meas_op_ROP as create_meas_op_ROP
         nufft_op = create_meas_op_ROP(MeasOpPytorchFinufft)
 
     meas_op = nufft_op(
@@ -130,14 +137,15 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         batches=data.get("batches", None),
     )
 
-    if param_measop["use_ROP"]:
-        print(f"INFO: data size before {param_measop['ROP_param']['ROP_type']} is {data['y'].numel()}", flush=True)
-        if param_measop["ROP_param"]["ROP_type"] == "MROP":
-            data["y"] = meas_op.MD(data["y"] * weight_corr)
-        elif param_measop["ROP_param"]["ROP_type"] == "CROP":
-            data["y"] = meas_op.D(data["y"] * weight_corr)
-        print(f"INFO: data size after {param_measop['ROP_param']['ROP_type']} is {data['y'].numel()}", flush=True)
-
+    with torch.cuda.nvtx.range("Preprocessing_ROP"):
+        if param_measop["use_ROP"]:
+            print(f"INFO: data size before {param_measop['ROP_param']['ROP_type']} is {data['y'].numel()}", flush=True)
+            if param_measop["ROP_param"]["ROP_type"] in ["MROP", "MROP_gaussian"]:
+                data["y"] = meas_op.MD(data["y"] * weight_corr)
+            elif param_measop["ROP_param"]["ROP_type"] == "CROP":
+                data["y"] = meas_op.D(data["y"] * weight_corr)
+            print(f"INFO: data size after {param_measop['ROP_param']['ROP_type']} is {data['y'].numel()}", flush=True)
+            
     meas_op_approx = None
     if param_optimiser["approx_meas_op"]:
         from .ri_measurement_operator.pysrc.measOperator.meas_op_PSF import MeasOpPSF
@@ -248,38 +256,50 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         )
 
     elif param_optimiser["algorithm"] == "usara":
-        prox_op_sara = ProxOpSARAPos(
-            param_measop["img_size"],
-            device=param_proxop["device"],
-            dtype=param_proxop["dtype"],
-            verbose=param_proxop["verbose"],
-        )
+        with torch.cuda.nvtx.range("prox_op_sara_initialisation"):
+            prox_op_class = ProxOpSARAPos if param_proxop["use_optimized"] else ProxOpSARAPos_original
+            prox_op_sara = prox_op_class(
+                param_measop["img_size"],
+                device=param_proxop["device"],
+                dtype=param_proxop["dtype"],
+                verbose=param_proxop["verbose"],
+            )
 
-        optimiser = FBSARA(
-            data["y"],
-            meas_op,
-            prox_op_sara,
-            use_ROP=param_measop["use_ROP"],
-            meas_op_approx=meas_op_approx,
-            im_min_itr=param_optimiser["im_min_itr"],
-            im_max_itr=param_optimiser["im_max_itr"],
-            im_var_tol=param_optimiser["im_var_tol"],
-            heu_reg_scale=param_optimiser["heu_reg_param_scale"],
-            new_heu=param_optimiser["new_heu"],
-            im_max_itr_outer=param_optimiser["im_max_outer_itr"],
-            im_var_tol_outer=param_optimiser["im_var_outer_tol"],
-            save_pth=param_optimiser["result_path"],
-            file_prefix=param_optimiser["file_prefix"],
-            reweight_save=param_optimiser["reweighting_save"],
-            verbose=param_optimiser["verbose"],
-        )
+        with torch.cuda.nvtx.range("FBSARA_initialisation"):
+            optimiser = FBSARA(
+                data["y"],
+                meas_op,
+                prox_op_sara,
+                use_ROP=param_measop["use_ROP"],
+                meas_op_approx=meas_op_approx,
+                im_min_itr=param_optimiser["im_min_itr"],
+                im_max_itr=param_optimiser["im_max_itr"],
+                im_var_tol=param_optimiser["im_var_tol"],
+                heu_reg_scale=param_optimiser["heu_reg_param_scale"],
+                new_heu=param_optimiser["new_heu"],
+                im_max_itr_outer=param_optimiser["im_max_outer_itr"],
+                im_var_tol_outer=param_optimiser["im_var_outer_tol"],
+                save_pth=param_optimiser["result_path"],
+                file_prefix=param_optimiser["file_prefix"],
+                reweight_save=param_optimiser["reweighting_save"],
+                verbose=param_optimiser["verbose"],
+            )
 
     # imaging
     if param_optimiser["flag_imaging"]:
+        
         # initialisation
-        optimiser.initialisation()
+        with torch.cuda.nvtx.range("Initialisation"):
+            optimiser.initialisation()
+        
+        #! DEBUG: run measurement operator and adjoint to check correctness
+        with torch.cuda.nvtx.range("Adjoint_Operator_Test"):
+            from src.mrop_ri_measurement_operator.test_meas_op import test_adjoint_op
+            test_adjoint_op(meas_op, param_measop["img_size"], param_measop["dtype"])
+        
         # run imaging loop
-        optimiser.run()
+        with torch.cuda.nvtx.range("Run_Optimiser"):
+            optimiser.run()
         # finalisation
         optimiser.finalisation()
 
@@ -316,3 +336,13 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
                     "INFO: The signal-to-noise ratio of the final",
                     f"reconstructed image is {rsnr} dB",
                 )
+
+        # Get peak memory active (tensors currently in memory)
+        max_allocated = torch.cuda.max_memory_allocated()
+
+        # Get peak memory reserved (total cache memory allocated from the driver)
+        max_reserved = torch.cuda.max_memory_reserved()
+
+        # Convert bytes to Megabytes (MB) where \(1\text{ MB} = 1024^2\text{ bytes}\)
+        print(f"Max GPU memory allocated: {max_allocated / (1024 ** 2):.2f} MB")
+        print(f"Max GPU memory reserved:  {max_reserved / (1024 ** 2):.2f} MB")

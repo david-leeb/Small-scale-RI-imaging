@@ -1,0 +1,56 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: mrop-interactive-job-
+  labels:
+    kueue.x-k8s.io/queue-name: eidf018ns-user-queue
+    eidf/user: s2908448-aspp
+spec:
+  ttlSecondsAfterFinished: 120
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        eidf/user: s2908448-aspp
+    spec:
+      restartPolicy: Never
+      activeDeadlineSeconds: 3600
+      securityContext:
+        fsGroup: 3607
+      containers:
+      - name: python-worker
+        stdin: true
+        tty: true
+        image: davidleeb24/mrop:v3
+        imagePullPolicy: Always
+        args: ["/bin/bash"]
+        resources:
+          requests:
+            cpu: 32
+            memory: '32Gi'
+          limits:
+            cpu: 32
+            memory: '32Gi'
+            nvidia.com/gpu: 1
+        volumeMounts:
+          - mountPath: /mnt/pvc
+            name: volume
+          - mountPath: /mnt/shared
+            name: volume2
+          - mountPath: /dev/shm
+            name: dshm
+      imagePullSecrets:
+        - name: eidfreg
+      volumes:
+        - name: volume
+          persistentVolumeClaim:
+            claimName: s2908448-aspp-pvc
+        - name: volume2
+          persistentVolumeClaim:
+            claimName: mlas-shared-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3

@@ -1,0 +1,71 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: mrop-profile-imager-
+  labels:
+    kueue.x-k8s.io/queue-name: eidf018ns-user-queue
+    eidf/user: s2908448-aspp
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 120
+  template:
+    metadata:
+      labels:
+        eidf/user: s2908448-aspp
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 3607
+      containers:
+      - name: python-worker
+        stdin: true
+        image: davidleeb24/mrop:v3
+        imagePullPolicy: Always
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          cd /mnt/pvc/diss/Small-scale-RI-imaging-mrop
+          export PATH="$(pwd)/nsys_bin/opt/nvidia/nsight-systems-cli/2026.2.1/target-linux-x64:$PATH"
+          mkdir -p logs_profiling
+          RUN_TIME=$(date +%Y%m%d_%H%M%S)
+          LOG_FILE="logs_profiling/profiling_run_${RUN_TIME}.log"
+          
+          # --- PROFILE MROP IMAGING ---
+          echo -e "\n=== Starting Profiling: MROP Config ===" >> "$LOG_FILE" 2>&1
+          nsys profile \
+            --trace=cuda,nvtx,osrt \
+            --cuda-memory-usage=true \
+            --output="logs_profiling/nsys_mrop_${RUN_TIME}" \
+            --export=sqlite \
+            --force-overwrite=true \
+            python run_imager_3c273.py -c "config/3C273_central_64chs_512_profile.json" >> "$LOG_FILE" 2>&1
+        resources:
+          requests:
+            cpu: 32
+            memory: '32Gi'
+          limits:
+            cpu: 32
+            memory: '32Gi'
+            nvidia.com/gpu: 1
+        volumeMounts:
+          - mountPath: /mnt/pvc
+            name: volume
+          - mountPath: /mnt/shared
+            name: volume2
+          - mountPath: /dev/shm
+            name: dshm
+      imagePullSecrets:
+        - name: eidfreg
+      volumes:
+        - name: volume
+          persistentVolumeClaim:
+            claimName: s2908448-aspp-pvc
+        - name: volume2
+          persistentVolumeClaim:
+            claimName: mlas-shared-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3

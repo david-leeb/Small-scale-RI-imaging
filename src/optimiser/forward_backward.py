@@ -115,62 +115,66 @@ class ForwardBackward(Optimiser):
             self._each_iter_begin()
 
             # forward step
-            if self._forward_cuda_timing:
-                forward_start_event.record()
-            else:
-                self._t_forward = timer()
-            # x_hat = self._model - self._gd_step_size * (
-            #     self._meas_op.adjoint_op(self._meas_op.forward_op(self._model))
-            #     - self._meas_bp
-            # )
-            if self._new_heu:
-                res = self._meas_op.adjoint_op(self._meas_op.forward_op(self._model)) - self._meas_bp
-                # Compute heuristic using cached _meas_bp_max and single GPU-CPU transfer
-                _cur_heuristic = res.std().item() / self._meas_bp_max
-                if self._algorithm == "usara":
-                    _threshold = _cur_heuristic / 3.0
-                    self._prox_op.set_noise_floor_level(_threshold) 
-                    self._prox_op.set_soft_thresholding_value(_threshold)
-                elif self._algorithm == "airi":
-                    self._heuristic = _cur_heuristic
-                x_hat = self._model - self._gd_step_size * res
-            else:
-                x_hat = self._model - self._gd_step_size * (
-                    self._meas_op.adjoint_op(self._meas_op.forward_op(self._model)) - self._meas_bp
+            with torch.cuda.nvtx.range("ForwardStep"):
+                if self._forward_cuda_timing:
+                    forward_start_event.record()
+                else:
+                    self._t_forward = timer()
+                # x_hat = self._model - self._gd_step_size * (
+                #     self._meas_op.adjoint_op(self._meas_op.forward_op(self._model))
+                #     - self._meas_bp
+                # )
+                if self._new_heu:
+                    res = self._meas_op.adjoint_op(self._meas_op.forward_op(self._model)) - self._meas_bp
+                    # Compute heuristic using cached _meas_bp_max and single GPU-CPU transfer
+                    _cur_heuristic = res.std().item() / self._meas_bp_max
+                    if self._algorithm == "usara":
+                        _threshold = _cur_heuristic / 3.0
+                        self._prox_op.set_noise_floor_level(_threshold) 
+                        self._prox_op.set_soft_thresholding_value(_threshold)
+                    elif self._algorithm == "airi":
+                        self._heuristic = _cur_heuristic
+                    x_hat = self._model - self._gd_step_size * res
+                else:
+                    x_hat = self._model - self._gd_step_size * (
+                        self._meas_op.adjoint_op(self._meas_op.forward_op(self._model)) - self._meas_bp
+                    )
+                x_hat = x_hat.to(
+                    device=self._prox_op.get_device(), dtype=self._prox_op.get_data_type()
                 )
-            x_hat = x_hat.to(
-                device=self._prox_op.get_device(), dtype=self._prox_op.get_data_type()
-            )
-            if self._forward_cuda_timing:
-                forward_end_event.record()
-                torch.cuda.synchronize()
-                self._t_forward = forward_start_event.elapsed_time(forward_end_event) / 1e3
-            else:
-                self._t_forward = timer() - self._t_forward
+                if self._forward_cuda_timing:
+                    forward_end_event.record()
+                    torch.cuda.synchronize()
+                    self._t_forward = forward_start_event.elapsed_time(forward_end_event) / 1e3
+                else:
+                    self._t_forward = timer() - self._t_forward
 
             # backward step
-            if self._backward_cuda_timing:
-                backward_start_event.record()
-            else:
-                self._t_backward = timer()
-            self._model = self._prox_op(x_hat)
-            self._model = self._model.to(device=self._meas_op.get_device()).to(
-                dtype=self._meas_op.get_data_type()
-            )
-            if self._backward_cuda_timing:
-                backward_end_event.record()
-                torch.cuda.synchronize()
-                self._t_backward = backward_start_event.elapsed_time(backward_end_event) / 1e3
-            else:
-                self._t_backward = timer() - self._t_backward
-            self._t_iter = timer() - self._t_iter
+            with torch.cuda.nvtx.range("BackwardStep"):
+                if self._backward_cuda_timing:
+                    backward_start_event.record()
+                else:
+                    self._t_backward = timer()
+                    
+                self._model = self._prox_op(x_hat)
+                
+                self._model = self._model.to(device=self._meas_op.get_device()).to(
+                    dtype=self._meas_op.get_data_type()
+                )
+                if self._backward_cuda_timing:
+                    backward_end_event.record()
+                    torch.cuda.synchronize()
+                    self._t_backward = backward_start_event.elapsed_time(backward_end_event) / 1e3
+                else:
+                    self._t_backward = timer() - self._t_backward
+                self._t_iter = timer() - self._t_iter
 
-            if self._stop_criteria():
-                break
+                if self._stop_criteria():
+                    break
 
-            self._each_iter_end()
+                self._each_iter_end()
 
-            self._model_prev = self._model
+                self._model_prev = self._model
 
         self._t_total = timer() - self._t_total
 

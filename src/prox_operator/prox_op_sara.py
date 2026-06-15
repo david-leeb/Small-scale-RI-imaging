@@ -6,8 +6,13 @@ from typing import Tuple, List, Union
 import torch
 import numpy as np
 import ptwt
+import pywt
+import nvtx
+import warnings
+import torch.nn.functional as F
 
 from .prox_op import ProxOp
+from .db_wavelets import CompiledWaveletBank
 
 WaveletCoeff = List[
     Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
@@ -86,227 +91,95 @@ class ProxOpSARAPos(ProxOp):
         self._obj_tol = obj_tol
         if self._dirac:
             self._wl_dict.remove("dirac")
-
-        # initialise dual variable
-        self._dual = self._wavedec2_dict(
-            torch.zeros((1, 1, *self._img_size), device=self._device, dtype=self._dtype)
+            
+        self._scale_factor_inv = torch.tensor(
+            1.0 / self._scale_factor, 
+            device=self._device, 
+            dtype=self._dtype
         )
+        
+        self.wavelet_bank = CompiledWaveletBank(self._wl_dict, self._dec_lev, self._img_size, self._device, self._dtype, self._dirac)
+        
+        self._init_state_buffers()
 
-        # self._coeffShape = []
-        # img = torch.zeors(1,1,*img_size)
-        # for basis in self._wl_dict:
-        #     curr_coeff = ptwt.wavedec2(img, basis, level=self._dec_lev, mode=self._mode)
-        #     coeffStart = 0
-        #     coeffEnd = coeffStart + torch.numel(curr_coeff[0])
-        #     self._coeffShape.append([(coeffStart,coeffEnd), curr_coeff[0].shape])
-        #     for i in range(1, self.dec_lev+1):
-        #         currShape = []
-        #         for j in range(3):
-        #             coeffStart = coeffEnd
-        #             coeffEnd = coeffStart + torch.numel(curr_coeff[i][0])
-
-    def _wavedec2_dict(self, x: torch.Tensor) -> WaveletDictCoeff:
+    def _init_state_buffers(self):
+        # We only need one dummy pass to establish the size of the 1D flat vector
+        dummy_x = torch.zeros((1, 1, *self._img_size), device=self._device, dtype=self._dtype)
+        dummy_flat = self.wavelet_bank.decompose_flat(dummy_x)
+        
+        self._dual_flat = torch.zeros_like(dummy_flat)
+        self._weights_flat = torch.ones_like(dummy_flat)
+        self._latest_norm_l1 = 0.0
+        self._sfth_val_tensor = torch.tensor(self._sfth_val, device=self._device, dtype=self._dtype)
+    
+    @nvtx.annotate()
+    @torch.compile(mode="max-autotune")
+    def _run_compiled_solver(
+        self, x: torch.Tensor, dual: torch.Tensor, weights: torch.Tensor, sfth_val_t: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Performs wavelet decomposition with multiple bases on the input tensor.
-
-        Args:
-            x (torch.Tensor): The input tensor to be decomposed.
-
-        Returns:
-            WaveletDictCoeff:
-                A list of wavelet coefficients. Each element in the list corresponds to the
-                wavelet decomposition with one basis. For each basis, the wavelet coefficients
-                are stored in a list where the first element is the approximation coefficients,
-                and the following tuple of three tensors corresponding to the horizontal, vertical,
-                and diagonal details. If the dirac basis is used, the last element in the list is
-                the scaled input tensor.
-
+        Executes the entire proximal optimization loop entirely on the GPU.
+        Fuses operations across all 20 iterations with zero Python overhead.
         """
-        coeff: WaveletDictCoeff = []
-        for basis in self._wl_dict:
-            curr_coeff = list(
-                ptwt.wavedec2(
-                    x / self._scale_factor, basis, level=self._dec_lev, mode=self._mode
-                )
-            )
-            coeff.append(curr_coeff)
-        if self._dirac:
-            coeff.append(x / self._scale_factor)
-        return coeff
-
-    def _waverec2_dict(self, y: WaveletDictCoeff) -> torch.Tensor:
-        """
-        Performs wavelet reconstruction with multiple bases on the input tensor.
-
-        Args:
-            y (WaveletDictCoeff):
-                A list of wavelet coefficients. Each element in the list corresponds to the
-                wavelet decomposition with one basis. For each basis, the wavelet coefficients
-                are stored in a list where the first element is the approximation coefficients,
-                and the following tuple of three tensors corresponding to the horizontal, vertical,
-                and diagonal details. If the dirac basis is used, the last element in the list is
-                the scaled input tensor.
-
-        Returns:
-            torch.Tensor: The reconstructed image.
-        """
-        result = torch.zeros(
-            1, 1, *self._img_size, device=self._device, dtype=self._dtype
-        )
-        for i, basis in enumerate(self._wl_dict):
-            result += ptwt.waverec2(y[i], basis) / self._scale_factor
-        if self._dirac:
-            result += y[-1] / self._scale_factor
-        return result
-
-    def _prox_l1_adj(self, z: torch.tensor, sfth: float) -> torch.tensor:
-        """
-        Proximity operator for the adjoint of l1 norm.
-
-        Args:
-            z (torch.Tensor): The input tensor.
-            sfth (float): The soft thresholding level.
-
-        Returns:
-            torch.Tensor: The result of applying the proximity operator on `z`.
-        """
-        return z - (
-            torch.sign(z)
-            * torch.maximum(
-                torch.abs(z) - sfth,
-                torch.zeros(1, 1, device=self._device, dtype=self._dtype),
-            )
-        )
-
-    def _sfth_dual(self, psit_img: WaveletDictCoeff) -> None:
-        """
-        Applies soft thresholding to `psit_img` and update the dual variable.
-
-        Args:
-            psit_img (WaveletDictCoeff):
-                The list of wavelet coeeficitents on which soft thresholding will be applied.
-        """
-        self._norm_l1 = 0.0
-        for i in range(len(self._wl_dict)):
-            self._dual[i][0] = self._prox_l1_adj(
-                self._dual[i][0] + psit_img[i][0], self._sfth_val * self._weights[i][0]
-            )
-            self._norm_l1 += torch.sum(torch.abs(psit_img[i][0] * self._weights[i][0]))
-            for j in range(1, self._dec_lev + 1):
-                self._dual[i][j] = tuple(
-                    self._prox_l1_adj(
-                        self._dual[i][j][k] + psit_img[i][j][k],
-                        self._sfth_val * self._weights[i][j][k],
-                    )
-                    for k in range(3)
-                )
-                for k in range(3):
-                    self._norm_l1 += torch.sum(
-                        torch.abs(psit_img[i][j][k] * self._weights[i][j][k])
-                    )
-        if self._dirac:
-            self._dual[-1] = self._prox_l1_adj(
-                self._dual[-1] + psit_img[-1], self._sfth_val * self._weights[-1]
-            )
-            self._norm_l1 += torch.sum(torch.abs(psit_img[-1] * self._weights[-1]))
-
+        curr_dual = dual
+        result = x
+        norm_l1 = torch.zeros((), device=x.device, dtype=x.dtype)
+        thresh = sfth_val_t * weights
+        
+        # torch.compile unrolls or loops this natively on the hardware
+        for _ in range(self._max_iter):
+            # Primal Update
+            rec = self.wavelet_bank.reconstruct_from_flat(curr_dual)
+            result = F.relu(x - (rec * self._scale_factor_inv))
+            
+            # Dual Update 
+            psit_flat = self.wavelet_bank.decompose_flat(result * self._scale_factor_inv)
+            
+            # Keep track of the L1 norm purely on the GPU
+            norm_l1 = torch.sum(torch.abs(psit_flat * weights))
+            
+            # Clean dual clipping 
+            curr_dual = torch.clamp(curr_dual + psit_flat, min=-thresh, max=thresh)
+            
+        return result, curr_dual, norm_l1
+    
     @torch.no_grad()
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Apply the proximity operator to the input tensor.
-        The SARA prior and positivity constraint are splited with dual forward-backward algorithm.
-
-        Args:
-            x (torch.Tensor): The input tensor.
-
-        Returns:
-            torch.Tensor: The output tensor after applying the proximity operator.
+        Apply the proximity operator to the input tensor using pure eager mode.
         """
-        # dual forward backward
-        obj_val_prev = -1
-        for i in range(self._max_iter):
-            # primal update
-            result = torch.maximum(
-                x - self._waverec2_dict(self._dual),
-                torch.zeros(
-                    1,
-                    1,
-                    device=self._device,
-                    dtype=self._dtype,
-                ),
-            )
-            norm_l2 = torch.sum((result - x) ** 2)
-            # dual update
-            self._sfth_dual(self._wavedec2_dict(result))
-            # stop criterion
-            obj_val = 0.5 * norm_l2.item() + self._sfth_val * self._norm_l1.item()
-            obj_rel_var = abs(obj_val - obj_val_prev) / obj_val
-            obj_val_prev = obj_val
-            if self._verbose > 1:
-                print(
-                    f"  Prox Iter {i+1}, prox_fval = {obj_val},",
-                    f"rel_fval = {obj_rel_var}, l1norm_w = {self._norm_l1.item()}",
-                    flush=True,
-                )
-            if obj_rel_var < self._obj_tol:
-                break
-        if self._verbose:
-            print(
-                f"  Prox converged: Iter {i+1}, rel_fval = {obj_rel_var},",
-                f"l1norm_w = {self._norm_l1.item()}",
-                flush=True,
-            )
+        
+        # Reset the dual variables for the new solver pass
+        self._dual_flat.zero_()
+        
+        # Execute the entire 20-iteration chain in one shot
+        torch.compiler.cudagraph_mark_step_begin()
+        result, final_dual, norm_l1 = self._run_compiled_solver(
+            x, self._dual_flat, self._weights_flat, self._sfth_val_tensor
+        )
+        
+        # Update your state buffer cleanly without ruining graph tracking
+        self._dual_flat.copy_(final_dual)
+        
+        # Save the final L1 norm for your getter function
+        self._latest_norm_l1 = norm_l1.item()
 
-        return result
-
+        return result.clone()
+    
+    @nvtx.annotate()
     def update(self, x: torch.tensor, initialisation: bool = False) -> None:
         """
-        Update the weight for l1 norm.
-
-        Args:
-            x (torch.Tensor): The input tensor.
-            initialisation (bool, optional): If True, initialize the weights to 1.
-                Defaults to False.
+        Update the weight for l1 norm using 1D contiguous vectors.
         """
-        self._weights = []
         if initialisation:
-            torch_one = torch.ones(
-                1,
-                1,
-                device=self._device,
-                dtype=self._dtype,
-            )
-            for basis in self._wl_dict:
-                weighting_i = [torch_one.clone()]
-                for i in range(1, self._dec_lev + 1):
-                    weighting_i.append(tuple(torch_one.clone() for _ in range(3)))
-                self._weights.append(weighting_i)
-            if self._dirac:
-                self._weights.append(torch_one.clone())
-        else:
-            x = x.to(self._dtype).to(self._device)
-            for basis in self._wl_dict:
-                curr_coeff = ptwt.wavedec2(
-                    x / self._scale_factor, basis, level=self._dec_lev, mode=self._mode
-                )
-                weighting_i = [
-                    self._wl_noise_floor
-                    / (self._wl_noise_floor + torch.abs(curr_coeff[0]))
-                ]
-                for i in range(1, self._dec_lev + 1):
-                    weighting_i.append(
-                        tuple(
-                            self._wl_noise_floor
-                            / (self._wl_noise_floor + torch.abs(curr_coeff[i][j]))
-                            for j in range(3)
-                        )
-                    )
-                self._weights.append(weighting_i)
-            if self._dirac:
-                self._weights.append(
-                    self._wl_noise_floor
-                    / (self._wl_noise_floor + torch.abs(x / self._scale_factor))
-                )
+            self._weights_flat.fill_(1.0)
+            return
+        
+        x = x.to(dtype=self._dtype, device=self._device)
+        coeffs_flat = self.wavelet_bank.decompose_flat(x)
+        w_flat = self._wl_noise_floor / (self._wl_noise_floor + torch.abs(coeffs_flat))
+        
+        self._weights_flat.copy_(w_flat)
 
     def get_l1_norm(self) -> float:
         """
@@ -315,7 +188,7 @@ class ProxOpSARAPos(ProxOp):
         Returns:
             float: The latest l1 norm.
         """
-        return self._norm_l1.item()
+        return self._latest_norm_l1
 
     def set_noise_floor_level(self, wl_noise_floor: float) -> None:
         """
@@ -334,3 +207,5 @@ class ProxOpSARAPos(ProxOp):
             sfth_val (float): The soft thresholding level for the wavelet coefficients.
         """
         self._sfth_val = sfth_val
+        if hasattr(self, '_sfth_val_tensor'):
+            self._sfth_val_tensor.fill_(sfth_val)

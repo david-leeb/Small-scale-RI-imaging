@@ -32,6 +32,12 @@ logs/
 *.onnx
 *.csv
 *.json
+*.tar
+
+# Nsys
+nsys_bin
+*.sqlite
+*.nsys-rep
 
 # WSCLEAN
 *.MS

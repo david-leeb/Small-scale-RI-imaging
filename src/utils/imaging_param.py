@@ -156,7 +156,7 @@ def set_imaging_params_ri(
             param_measop["ROP_param"] = {"Q": param_general.get("ROP_Q", None)}
         else:
             param_measop["ROP_param"] = None
-    elif param_measop["ROP_type"] in ["MROP", "CROP"]:
+    elif param_measop["ROP_type"] in ["MROP", "CROP", "MROP_gaussian"]:
         param_measop["use_ROP"] = True
         if "ROP_seed" not in param_general:
             try:
@@ -361,6 +361,7 @@ def set_imaging_params_ri(
         # specific parameters for uSARA
         if param_optimiser["algorithm"] == "usara":
             param_optimiser["approx_meas_op"] = param_general.get("approx_meas_op", False)
+            param_proxop["use_optimized"] = param_general.get("use_optimized", True)
             
     param_measop["meas_op_norm"] = param_general.get("meas_op_norm", None)
     param_measop["heu_corr_factor"] = param_general.get("heu_corr_factor", None)
