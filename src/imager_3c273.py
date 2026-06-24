@@ -18,6 +18,31 @@ from .utils import gen_imaging_weight
 # from .ri_measurement_operator.pysrc.utils.io import load_data_to_tensor
 from .utils.io_3c273 import load_data_to_tensor
 
+def solve_epsilon_same_aa(N, Q, B, K, N_ratio=1.0, n=1.0, verbose=False):
+    from scipy.optimize import fsolve
+
+    # Polynomial from P_Q = eps*Q, M_B = eps/n*B, M_K = eps/n*K and D = N*N_ratio:
+    # 0 = eps^4 - eps^3/Q - 2n^2*N*N_ratio/(Q^2*B*K)
+    c = 2 * n**2 * N * N_ratio / (Q**2 * B * K)
+    fun = lambda eps: eps**4 - eps**3 / Q - c
+    epsilon = float(np.clip(fsolve(fun, c ** (1 / 4))[0], 0.0, 1.0))
+
+    P_Q = min(max(2, int(np.round(epsilon * Q))), Q)
+    M_K = min(max(1, int(np.round(epsilon / n * K))), K)
+
+    # Back-solve M_B from P_Q*(P_Q-1)/2 * M_B * M_K = N * N_ratio
+    mb_target = N * N_ratio / (P_Q * (P_Q - 1) / 2 * M_K)
+    M_B_lo = min(max(1, int(np.floor(mb_target))), B)
+    M_B_hi = min(max(1, int(np.ceil(mb_target))), B)
+    D_lo = P_Q * (P_Q - 1) / 2 * M_B_lo * M_K
+    D_hi = P_Q * (P_Q - 1) / 2 * M_B_hi * M_K
+    M_B = M_B_lo if abs(D_lo - N * N_ratio) <= abs(D_hi - N * N_ratio) else M_B_hi
+
+    D = P_Q * (P_Q - 1) / 2 * M_B * M_K
+    if verbose:
+        print(f"Q -> P_Q: {Q} -> {P_Q}; B -> M_B: {B} -> {M_B}; K -> M_K: {K} -> {M_K}")
+        print(f"D = {D}; D/N = {D/N:.6f}; N_ratio = {N_ratio}")
+    return epsilon, P_Q, M_B, M_K
 
 def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> None:
     """
@@ -66,28 +91,39 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
     # if data["nFreqs"] == 1:
     #     data["flag"] = data["flag"][:, 0, :].unsqueeze(1)
 
-    if param_measop["use_ROP"]:
-        assert param_measop["use_BDA"] is False, "BDA cannot be used with ROP"
-        from .mrop_ri_measurement_operator import weighting_correction
+    if param_measop["ROP_param"]["Q"] is None:
+        assert "Q" in data, "number of anntennas Q is not in data and not provided"
+        param_measop["ROP_param"]["Q"] = int(data["Q"])
 
-        if param_measop["ROP_param"]["Q"] is None:
-            assert "Q" in data, "number of anntennas Q is not in data and not provided"
-            param_measop["ROP_param"]["Q"] = int(data["Q"])
-        if param_measop["ROP_param"]["B"] is None:
-            if "flag" in data and data["flag"] is not None and "B" not in data:
-                data["B"] = (
-                    data["flag"].shape[-1]
-                    / (param_measop["ROP_param"]["Q"] * (param_measop["ROP_param"]["Q"] - 1))
-                    * 2
-                    * data["nFreqs"]
-                )
-            assert "B" in data, "number of snapshots B is not in data and not provided"
-            param_measop["ROP_param"]["B"] = int(data["B"])
-        data, weight_corr = weighting_correction(data, param_measop["ROP_param"])
-        print(
-            f"INFO: Correction has been applied to the weighting for {param_measop['ROP_param']['ROP_type']}", flush=True
-        )
+    N = int(np.prod(param_measop["img_size"]))
+    K = int(data["nFreqs"])
+    V = int(param_measop["ROP_param"]["Q"] * (param_measop["ROP_param"]["Q"] - 1) // 2)
+    B = int(data["B_per_ch"])
+    Q = int(param_measop["ROP_param"]["Q"])
+    
+    print(f"INFO: Original dimensions: N = {N}, Q = {Q}, K = {K}, B = {B}, N_ratio = {param_measop["ROP_param"]["N_ratio"]}.")
+    epsilon, P_Q, M_B, M_K = solve_epsilon_same_aa(N, param_measop["ROP_param"]["Q"], B, K, param_measop["ROP_param"]["N_ratio"], param_measop["ROP_param"]["epsilon_n"])
+    print(f"INFO: Calculated epsilon for MROP modulation dimensions: {epsilon:.4f} (epsilon = (N / Q^2VK)^(1/4)).")
+    param_measop["ROP_param"]["M_K"] = M_K
+    param_measop["ROP_param"]["M_B"] = M_B
+    param_measop["ROP_param"]["P"] = P_Q #* (P_Q - 1) // 2
+    param_measop["ROP_param"]["M"] = M_K * M_B
+    print(f"INFO: MROP set with P = {param_measop["ROP_param"]["P"]}, M_K = {param_measop["ROP_param"]["M_K"]}, M_B = {param_measop["ROP_param"]["M_B"]}, M = {param_measop["ROP_param"]["M"]}.")
+    print(f"INFO: PM / N = {param_measop["ROP_param"]["P"] * param_measop["ROP_param"]["M"] / N:.4f}", flush=True)
 
+    if param_measop["ROP_param"]["B"] is None:
+        if "flag" in data and data["flag"] is not None and "B" not in data:
+            data["B"] = data["flag"].shape[-1] / V * K
+        assert "B" in data, "number of snapshots B is not in data and not provided"
+        param_measop["ROP_param"]["B"] = int(data["B"])
+    
+    from .mrop_ri_measurement_operator import weighting_correction
+    data, weight_corr = weighting_correction(data, param_measop["ROP_param"])
+    print(
+        f"INFO: Correction has been applied to the weighting for {param_measop['ROP_param']['ROP_type']}",
+        flush=True,
+    )
+    
     meas_op = None
 
     if not param_measop["use_ROP"]:
@@ -114,9 +150,13 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         # else:
         #     from .mrop_ri_measurement_operator import create_meas_op_ROP
 
+        ORIGINAL = False
         if param_measop["ROP_param"]["ROP_vmap"]:
             from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft_original import MeasOpPytorchFinufft
             from .mrop_ri_measurement_operator import create_meas_op_ROP_vmap as create_meas_op_ROP
+        elif ORIGINAL:
+            from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft
+            from .mrop_ri_measurement_operator import create_meas_op_ROP_new_taylor as create_meas_op_ROP
         else:
             from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft
             from .mrop_ri_measurement_operator import create_meas_op_ROP as create_meas_op_ROP

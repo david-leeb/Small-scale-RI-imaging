@@ -317,7 +317,8 @@ class ProxOpSARAPos_original(ProxOp):
         Returns:
             float: The latest l1 norm.
         """
-        return self._norm_l1.item()
+        return self._norm_l1
+        # return self._norm_l1.item()
 
     def set_noise_floor_level(self, wl_noise_floor: float) -> None:
         """

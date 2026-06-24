@@ -38,7 +38,7 @@ spec:
             --output="logs_profiling/nsys_mrop_${RUN_TIME}" \
             --export=sqlite \
             --force-overwrite=true \
-            python run_imager_3c273.py -c "config/3C273_central_64chs_512_profile.json" >> "$LOG_FILE" 2>&1
+            python run_imager_3c273.py -c "config/3C273_central_16chs_512_profile.json" >> "$LOG_FILE" 2>&1
         resources:
           requests:
             cpu: 32
