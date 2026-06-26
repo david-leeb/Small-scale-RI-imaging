@@ -17,32 +17,7 @@ from .optimiser import FBAIRI, PDAIRI, FBSARA
 from .utils import gen_imaging_weight
 # from .ri_measurement_operator.pysrc.utils.io import load_data_to_tensor
 from .utils.io_3c273 import load_data_to_tensor
-
-def solve_epsilon_same_aa(N, Q, B, K, N_ratio=1.0, n=1.0, verbose=False):
-    from scipy.optimize import fsolve
-
-    # Polynomial from P_Q = eps*Q, M_B = eps/n*B, M_K = eps/n*K and D = N*N_ratio:
-    # 0 = eps^4 - eps^3/Q - 2n^2*N*N_ratio/(Q^2*B*K)
-    c = 2 * n**2 * N * N_ratio / (Q**2 * B * K)
-    fun = lambda eps: eps**4 - eps**3 / Q - c
-    epsilon = float(np.clip(fsolve(fun, c ** (1 / 4))[0], 0.0, 1.0))
-
-    P_Q = min(max(2, int(np.round(epsilon * Q))), Q)
-    M_K = min(max(1, int(np.round(epsilon / n * K))), K)
-
-    # Back-solve M_B from P_Q*(P_Q-1)/2 * M_B * M_K = N * N_ratio
-    mb_target = N * N_ratio / (P_Q * (P_Q - 1) / 2 * M_K)
-    M_B_lo = min(max(1, int(np.floor(mb_target))), B)
-    M_B_hi = min(max(1, int(np.ceil(mb_target))), B)
-    D_lo = P_Q * (P_Q - 1) / 2 * M_B_lo * M_K
-    D_hi = P_Q * (P_Q - 1) / 2 * M_B_hi * M_K
-    M_B = M_B_lo if abs(D_lo - N * N_ratio) <= abs(D_hi - N * N_ratio) else M_B_hi
-
-    D = P_Q * (P_Q - 1) / 2 * M_B * M_K
-    if verbose:
-        print(f"Q -> P_Q: {Q} -> {P_Q}; B -> M_B: {B} -> {M_B}; K -> M_K: {K} -> {M_K}")
-        print(f"D = {D}; D/N = {D/N:.6f}; N_ratio = {N_ratio}")
-    return epsilon, P_Q, M_B, M_K
+from src.mrop_ri_measurement_operator.src.utils.solve_epsilon_new import solve_epsilon_same_aa
 
 def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> None:
     """

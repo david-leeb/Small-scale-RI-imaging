@@ -19,7 +19,7 @@ spec:
       containers:
       - name: python-worker
         stdin: true
-        image: davidleeb24/mrop:v3
+        image: davidleeb24/mrop:v4
         imagePullPolicy: Always
         command: ["/bin/bash", "-c"]
         args:
@@ -29,7 +29,7 @@ spec:
           LOG_FILE="logs/output_$(date +%Y%m%d_%H%M%S).log"
           
           echo -e "\n=== Starting MROP Imaging ===" >> "$LOG_FILE" 2>&1
-          python run_imager_3c273.py -c "config/3C273_central_64chs_512.json" >> "$LOG_FILE" 2>&1
+          python run_imager_meerkat_wstacking.py -c "config/meerkat_central_10chs_2048.json" >> "$LOG_FILE" 2>&1
         resources:
           requests:
             cpu: 32

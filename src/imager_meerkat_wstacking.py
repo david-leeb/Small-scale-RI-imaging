@@ -12,9 +12,14 @@ from .optimiser import FBAIRI, PDAIRI, FBSARA
 from .utils import gen_imaging_weight
 # from .ri_measurement_operator.pysrc.utils.io import load_data_to_tensor
 # from .ri_measurement_operator.pysrc.utils.io_new import load_data_to_tensor
-from .ri_measurement_operator.pysrc.utils.io_meerkat import load_real_data_to_tensor
+from .utils.io_meerkat import load_real_data_to_tensor
 from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft_wstacking import MeasOpPytorchFinufftWStacking
+from .utils.wstacking import compute_w_stacks
+from src.mrop_ri_measurement_operator.src.utils.solve_epsilon_new import solve_epsilon_same_aa
 
+torch.set_float32_matmul_precision('high')
+torch.cuda.reset_peak_memory_stats()
+torch.cuda.empty_cache()
 
 def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> None:
     """
@@ -39,79 +44,132 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
             and 'verbose'.
     """
     # initialisation
-    
-    # data = load_data_to_tensor(
-    #     param_optimiser["data_file"],
-    #     super_resolution=param_measop["superresolution"],
-    #     image_pixel_size=param_measop["im_pixel_size"],
-    #     data_weighting=param_measop["flag_data_weighting"],
-    #     load_weight=param_measop["weight_load"],
-    #     img_size=param_measop["img_size"],
-    #     uv_unit="radians",
-    #     weight_type=param_measop["weight_type"],
-    #     # weight_gridsize=param_measop["weight_gridsize"],
-    #     weight_robustness=param_measop["weight_robustness"],
-    #     dtype=param_measop["dtype"],
-    #     device=param_measop["device"],
-    #     verbose=param_optimiser["verbose"],
-    # )
-    
     data = load_real_data_to_tensor(
         data_path=param_optimiser["data_file"],
-        # super_resolution=args.super_resolution,
+        super_resolution=param_measop["superresolution"],
         image_pixel_size=param_measop["im_pixel_size"],
         img_size=param_measop["img_size"],
-        # start_ch=105,
-        # end_ch=115,
+        nfreqs=param_measop["nfreqs"],
+        freq_num=param_measop["freq_num"],
         data_weighting=param_measop["flag_data_weighting"],
         weight_type=param_measop["weight_type"],
         weight_robustness=param_measop["weight_robustness"],
+        device=param_measop["device"],
     )
+    
+    if param_measop["ROP_param"]["Q"] is None:
+        assert "Q" in data, "number of anntennas Q is not in data and not provided"
+        param_measop["ROP_param"]["Q"] = int(data["Q"])
+
+    N = int(np.prod(param_measop["img_size"]))
+    K = int(data["nFreqs"])
+    V = int(param_measop["ROP_param"]["Q"] * (param_measop["ROP_param"]["Q"] - 1) // 2)
+        
+    if param_measop["ROP_param"]["B"] is None:
+        if "flag" in data and data["flag"] is not None and "B" not in data:
+            data["B"] = data["flag"].shape[-1] / V #! VERIFY 
+        assert "B" in data, "number of snapshots B is not in data and not provided"
+        param_measop["ROP_param"]["B"] = int(data["B"])
+        print("INFO: B set to ", int(data["B"]))
+        
+    param_measop["im_pixel_size"] = data["image_pixel_size"]
+    
+    # B = int(data["B_per_ch"]) 
+    B = int(data["B"] / data["nFreqs"]) #! CHECK B ALLOCATION
+    Q = int(param_measop["ROP_param"]["Q"])
+    
+    print(f"INFO: Original dimensions: N = {N}, Q = {Q}, K = {K}, B = {B}, N_ratio = {param_measop["ROP_param"]["N_ratio"]}.")
+    epsilon, P_Q, M_B, M_K = solve_epsilon_same_aa(N, param_measop["ROP_param"]["Q"], B, K, param_measop["ROP_param"]["N_ratio"], param_measop["ROP_param"]["epsilon_n"])
+    print(f"INFO: Calculated epsilon for MROP modulation dimensions: {epsilon:.4f} (epsilon = (N / Q^2VK)^(1/4)).")
+    param_measop["ROP_param"]["M_K"] = M_K
+    param_measop["ROP_param"]["M_B"] = M_B
+    param_measop["ROP_param"]["P"] = P_Q #* (P_Q - 1) // 2
+    param_measop["ROP_param"]["M"] = M_K * M_B
+    print(f"INFO: MROP set with P = {param_measop["ROP_param"]["P"]}, M_K = {param_measop["ROP_param"]["M_K"]}, M_B = {param_measop["ROP_param"]["M_B"]}, M = {param_measop["ROP_param"]["M"]}.")
+    print(f"INFO: PM / N = {param_measop["ROP_param"]["P"] * param_measop["ROP_param"]["M"] / N:.4f}", flush=True)
     
     fov_radians = (
         (data["image_pixel_size"] / 3600) * param_measop["img_size"][0] * np.pi / 180,
         (data["image_pixel_size"] / 3600) * param_measop["img_size"][1] * np.pi / 180,
     )
     
-    num_wstacks = np.ceil(
-        data["w"].numpy(force=True).max() * 2 * np.pi * (1 - np.sqrt(1 - 2 * np.sin(fov_radians[0] / 2) ** 2))
+    num_wstacks = int(np.ceil(
+        data["w"].numpy(force=True).max() * 2 * np.pi * (1 - np.sqrt(1 - 2 * np.sin(fov_radians[0] / 2) ** 2)))
     )
     w_max = data["w"].numpy(force=True).max()
-    num_wstacks = int(max(num_wstacks, torch.cuda.device_count()))
+    # num_wstacks = int(max(num_wstacks, torch.cuda.device_count()))
     print(f"INFO: FOV in radians: {fov_radians}, max w value: {w_max:.4f}, number of w-stacks determined to be {num_wstacks} based on the FOV and max w value.", flush=True)
-    assert torch.cuda.is_available()
-    num_gpus = torch.cuda.device_count()
-    print(f"Found {num_gpus} GPUs")
     
-    # meas_op = None
-    meas_op = MeasOpPytorchFinufftWStacking(
+    w_center, w_stack_correct, w_stack_idx, meas_op = compute_w_stacks(data["w"], num_wstacks, param_measop, data)
+    w_stack_data = {
+        "w_center": w_center,
+        "corrections": w_stack_correct,
+        "stack_idx": w_stack_idx,
+        "meas_op": meas_op,
+    }
+    
+    from .mrop_ri_measurement_operator import create_meas_op_ROP as create_meas_op_ROP
+    from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft
+    nufft_op = create_meas_op_ROP(MeasOpPytorchFinufft)
+
+    meas_op = nufft_op(
         u=data["u"],
         v=data["v"],
-        w=data["w"],
-        image_pixel_size=param_measop["im_pixel_size"],
-        num_wstacks=num_wstacks,
+        flag=data["flag"],
         img_size=param_measop["img_size"],
         natural_weight=data["nW"],
         image_weight=data["nWimag"],
-        real_flag=True,
         device=param_measop["device"],
-        device_list=[param_measop["device"]],
         dtype=param_measop["dtype"],
-        kmeans_pkg="sklearn",
+        num_chs=data["nFreqs"],
+        ROP_param=param_measop["ROP_param"],
+        real_flag=True,
+        w_stack_data=w_stack_data
     )
     
-    y = [
-        (
-            data["y"][..., meas_op._w_stack_idx == i]
-            * data["nW"][..., meas_op._w_stack_idx == i]
-            * data["nWimag"][..., meas_op._w_stack_idx == i]
-        )
-        .to(meas_op._device[i])
-        .view(1, 1, -1)
-        for i in range(num_wstacks)
-    ]
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
+    from .mrop_ri_measurement_operator import weighting_correction
+    data, weight_corr = weighting_correction(data, param_measop["ROP_param"])
+    print(
+        f"INFO: Correction has been applied to the weighting for {param_measop['ROP_param']['ROP_type']}",
+        flush=True,
+    )
+    
+    if param_measop["use_ROP"]:
+        print(f"INFO: data size before {param_measop['ROP_param']['ROP_type']} is {data['y'].numel()}", flush=True)
+        if param_measop["ROP_param"]["ROP_type"] in ["MROP", "MROP_gaussian"]:
+            data["y"] = meas_op.MD(data["y"] * weight_corr)
+        elif param_measop["ROP_param"]["ROP_type"] == "CROP":
+            data["y"] = meas_op.D(data["y"] * weight_corr)
+        print(f"INFO: data size after {param_measop['ROP_param']['ROP_type']} is {data['y'].numel()}", flush=True)
+    
+    # meas_op = MeasOpPytorchFinufftWStacking(
+    #     u=data["u"],
+    #     v=data["v"],
+    #     w=data["w"],
+    #     image_pixel_size=param_measop["im_pixel_size"],
+    #     num_wstacks=num_wstacks,
+    #     img_size=param_measop["img_size"],
+    #     natural_weight=data["nW"],
+    #     image_weight=data["nWimag"],
+    #     real_flag=True,
+    #     device=param_measop["device"],
+    #     device_list=[param_measop["device"]],
+    #     dtype=param_measop["dtype"],
+    #     kmeans_pkg="sklearn",
+    # )
+    
+    # y = [
+    #     (
+    #         data["y"][..., meas_op._w_stack_idx == i]
+    #         * data["nW"][..., meas_op._w_stack_idx == i]
+    #         * data["nWimag"][..., meas_op._w_stack_idx == i]
+    #     )
+    #     .to(meas_op._device[i])
+    #     .view(1, 1, -1)
+    #     for i in range(num_wstacks)
+    # ]
+    # torch.cuda.synchronize()
+    # torch.cuda.empty_cache()
     
     meas_op_approx = None
     if param_optimiser["approx_meas_op"]:
@@ -231,7 +289,7 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         )
 
         optimiser = FBSARA(
-            y,
+            data["y"],
             meas_op,
             prox_op_sara,
             use_ROP=param_measop["use_ROP"],
@@ -253,6 +311,11 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
     if param_optimiser["flag_imaging"]:
         # initialisation
         optimiser.initialisation()
+        
+        #! DEBUG: run measurement operator and adjoint to check correctness
+        from src.mrop_ri_measurement_operator.test_meas_op import test_adjoint_op
+        test_adjoint_op(meas_op, param_measop["img_size"], param_measop["dtype"])
+            
         # run imaging loop
         optimiser.run()
         # finalisation
@@ -291,3 +354,13 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
                     "INFO: The signal-to-noise ratio of the final",
                     f"reconstructed image is {rsnr} dB",
                 )
+
+        # Get peak memory active (tensors currently in memory)
+        max_allocated = torch.cuda.max_memory_allocated()
+
+        # Get peak memory reserved (total cache memory allocated from the driver)
+        max_reserved = torch.cuda.max_memory_reserved()
+
+        # Convert bytes to Megabytes (MB) where \(1\text{ MB} = 1024^2\text{ bytes}\)
+        print(f"Max GPU memory allocated: {max_allocated / (1024 ** 2):.2f} MB")
+        print(f"Max GPU memory reserved:  {max_reserved / (1024 ** 2):.2f} MB")

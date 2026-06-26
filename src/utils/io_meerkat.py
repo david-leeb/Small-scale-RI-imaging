@@ -8,10 +8,13 @@ def _load_single_channel(args):
     from scipy.io import loadmat
     from scipy.constants import speed_of_light
     
-    data_path, ch_idx, start_ch, u, v, w, wavelength = args
+    data_path, ch_idx, wavelength = args
     
     ch_data = loadmat(os.path.join(data_path, f"_data_ch_{ch_idx+1}.mat"))
     ch_flag = ch_data["flag"].astype(bool).squeeze()
+    
+    uvw = loadmat(os.path.join(data_path, "msSpecs.mat"))["uvw"]
+    u, v, w = uvw[:, 0], uvw[:, 1], uvw[:, 2]
     
     if ch_data["data_I"].size > 0:
         return {
@@ -20,20 +23,21 @@ def _load_single_channel(args):
             "w": w[ch_flag] / wavelength,
             "data": ch_data["data_I"].squeeze(),
             "nW": ch_data["weightsNat"].squeeze(),
+            "ch_flag": ch_flag
         }
     else:
         return None
 
 def load_real_data_to_tensor(
     data_path: str,
-    start_ch: int = 0,
-    end_ch: int = -1,
     super_resolution: float = None,
     image_pixel_size: float = None,
     img_size: tuple[int, int] = (4096, 4096),
     data_weighting: bool = True,
     weight_type: str = "briggs",
     weight_robustness: float = 0.0,
+    nfreqs: int = None,
+    freq_num: int = None,
     device: torch.device = torch.device("cpu"),
     num_workers: int = None,
 ):
@@ -54,14 +58,11 @@ def load_real_data_to_tensor(
     c_dtype = torch.complex128
 
     msSpecs = loadmat(os.path.join(data_path, "msSpecs.mat"))
-    u = msSpecs["uvw"][:, 0]
-    v = msSpecs["uvw"][:, 1]
-    w = msSpecs["uvw"][:, 2]
+    # u = msSpecs["uvw"][:, 0]
+    # v = msSpecs["uvw"][:, 1]
+    # w = msSpecs["uvw"][:, 2]
     
-    if end_ch == -1:
-        freqs = msSpecs["freqs"].squeeze()[start_ch:]
-    else:
-        freqs = msSpecs["freqs"].squeeze()[start_ch : end_ch]
+    freqs = msSpecs["freqs"].squeeze()[freq_num : freq_num + nfreqs]
     
     num_channels = freqs.size
     if num_workers is None:
@@ -71,8 +72,8 @@ def load_real_data_to_tensor(
     
     # Prepare arguments for parallel loading
     channel_args = [
-        (data_path, i, start_ch, u, v, w, speed_of_light / freqs.squeeze()[i - start_ch])
-        for i in range(start_ch, start_ch + num_channels)
+        (data_path, i, speed_of_light / freqs[i - freq_num])
+        for i in range(freq_num, freq_num + num_channels)
     ]
     
     # Load channels in parallel
@@ -94,14 +95,15 @@ def load_real_data_to_tensor(
     w_cat = np.concatenate([r["w"] for r in channel_results])
     data = np.concatenate([r["data"] for r in channel_results])
     nW = np.concatenate([r["nW"] for r in channel_results])
+    flags = np.concatenate([r["ch_flag"] for r in channel_results])
     
     data_size = data.size
     print(
-        f"INFO: Total number of visibilities: {data_size}, with {num_channels} frequency channels ({start_ch} to {start_ch + num_channels - 1}).",
+        f"INFO: Total number of visibilities: {data_size}, with {num_channels} frequency channels ({freq_num} to {freq_num + num_channels - 1}).",
         flush=True,
     )
     
-    del u, v, w, channel_results
+    del channel_results
 
     max_proj_baseline = np.max(np.sqrt(u_cat**2 + v_cat**2))
     data_dict = {}
@@ -137,6 +139,8 @@ def load_real_data_to_tensor(
     data_dict["w"] = -torch.tensor(w_cat, dtype=dtype, device=device).view(1, 1, -1)
     data_dict["nW"] = torch.tensor(nW, dtype=dtype, device=device).view(1, 1, -1)
     data_dict["y"] = torch.tensor(data, dtype=c_dtype, device=device).view(1, 1, -1)
+    data_dict["flag"] = torch.tensor(flags, dtype=dtype, device=device).view(1, 1, -1)
+    data_dict["nFreqs"] = len(freqs)
 
     del u_cat, v_cat, w_cat, data, nW
     gc.collect()

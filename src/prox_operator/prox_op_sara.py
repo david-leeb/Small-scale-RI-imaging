@@ -4,13 +4,11 @@ import numpy as np
 import ptwt
 import nvtx
 import pywt
+import torch.nn.functional as F
+import warnings
 
 from .prox_op import ProxOp
 
-import torch
-import torch.nn.functional as F
-import ptwt
-import pywt
     
 @torch.compile
 def _primal_update_inplace(
@@ -134,22 +132,24 @@ class ProxOpSARAPos(ProxOp):
             ))
             self._wavelets.append(wt)
             
-            # 2. Trace the decomposition
-            jit_dec = torch.jit.trace(
-                _traceable_wavedec2, 
-                (dummy_x, wt, self._dec_lev), 
-                strict=False
-            )
-            self._dec_fns.append(jit_dec)
-            
-            # 3. Get dummy stacked coefficients to trace the reconstruction
-            dummy_coeffs = jit_dec(dummy_x, wt, self._dec_lev)
-            jit_rec = torch.jit.trace(
-                _traceable_waverec2, 
-                (dummy_coeffs, wt), 
-                strict=False
-            )
-            self._rec_fns.append(jit_rec)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                # 2. Trace the decomposition
+                jit_dec = torch.jit.trace(
+                    _traceable_wavedec2, 
+                    (dummy_x, wt, self._dec_lev), 
+                    strict=False
+                )
+                self._dec_fns.append(jit_dec)
+                
+                # 3. Get dummy stacked coefficients to trace the reconstruction
+                dummy_coeffs = jit_dec(dummy_x, wt, self._dec_lev)
+                jit_rec = torch.jit.trace(
+                    _traceable_waverec2, 
+                    (dummy_coeffs, wt), 
+                    strict=False
+                )
+                self._rec_fns.append(jit_rec)
 
         # ── Static persistent buffers ─────────────────────────────────────────
         # All must be alive for the full lifetime of the CUDA graph.
@@ -359,7 +359,7 @@ class ProxOpSARAPos(ProxOp):
                 flush=True,
             )
 
-        return self._result
+        return self._result.clone()
 
     def update(self, x: torch.Tensor, initialisation: bool = False) -> None:
         """Update the weights directly into the contiguous 1D memory pool."""
