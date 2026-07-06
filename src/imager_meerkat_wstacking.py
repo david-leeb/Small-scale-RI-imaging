@@ -7,6 +7,9 @@ import torch
 import numpy as np
 from astropy.io import fits
 
+import ctypes
+import gc
+
 from .prox_operator import ProxOpAIRI, ProxOpElipse, ProxOpSARAPos
 from .optimiser import FBAIRI, PDAIRI, FBSARA
 from .utils import gen_imaging_weight
@@ -18,8 +21,15 @@ from .utils.wstacking import compute_w_stacks
 from src.mrop_ri_measurement_operator.src.utils.solve_epsilon_new import solve_epsilon_same_aa
 
 torch.set_float32_matmul_precision('high')
-torch.cuda.reset_peak_memory_stats()
-torch.cuda.empty_cache()
+
+def _mem(label, devices):
+    for idx, dev in enumerate(devices):
+        alloc = torch.cuda.memory_allocated(dev) / 1024**3
+        peak = torch.cuda.max_memory_allocated(dev) / 1024**3
+        free, total = torch.cuda.mem_get_info(dev)
+        driver = (total - free) / 1024**3
+        print(f"[MEM] {label:<45} dev={idx} torch={alloc:.2f} GB  peak={peak:.2f} GB  driver={driver:.2f} GB", flush=True)
+        torch.cuda.reset_peak_memory_stats(dev)
 
 def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> None:
     """
@@ -43,6 +53,10 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
             It includes parameters like 'dnn_shelf_path', 'dnn_apply_transform', 'device', 'dtype',
             and 'verbose'.
     """
+    
+    torch.cuda.reset_peak_memory_stats()
+    _mem("START", [param_measop["device"]])
+
     # initialisation
     data = load_real_data_to_tensor(
         data_path=param_optimiser["data_file"],
@@ -56,6 +70,18 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         weight_robustness=param_measop["weight_robustness"],
         device=param_measop["device"],
     )
+    
+    _mem("after load_real_data_to_tensor", [param_measop["device"]])
+    
+    from .mrop_ri_measurement_operator import weighting_correction
+    data, weight_corr = weighting_correction(data, param_measop["ROP_param"])
+    print(
+        f"INFO: Correction has been applied to the weighting for {param_measop['ROP_param']['ROP_type']}",
+        flush=True,
+    )
+    gc.collect()
+    torch.cuda.empty_cache()
+    _mem("after weighting_correction", [param_measop["device"]])
     
     if param_measop["ROP_param"]["Q"] is None:
         assert "Q" in data, "number of anntennas Q is not in data and not provided"
@@ -88,88 +114,60 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
     print(f"INFO: MROP set with P = {param_measop["ROP_param"]["P"]}, M_K = {param_measop["ROP_param"]["M_K"]}, M_B = {param_measop["ROP_param"]["M_B"]}, M = {param_measop["ROP_param"]["M"]}.")
     print(f"INFO: PM / N = {param_measop["ROP_param"]["P"] * param_measop["ROP_param"]["M"] / N:.4f}", flush=True)
     
-    fov_radians = (
-        (data["image_pixel_size"] / 3600) * param_measop["img_size"][0] * np.pi / 180,
-        (data["image_pixel_size"] / 3600) * param_measop["img_size"][1] * np.pi / 180,
-    )
+    device = param_measop["device"]
+    devices = None
+    if device == torch.device("cuda"):
+        devices = [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
+        print("INFO: Detected", len(devices), "GPUs")
+    #! consider multi GPU setup here to make sure all functions have the same params
     
-    num_wstacks = int(np.ceil(
-        data["w"].numpy(force=True).max() * 2 * np.pi * (1 - np.sqrt(1 - 2 * np.sin(fov_radians[0] / 2) ** 2)))
-    )
-    w_max = data["w"].numpy(force=True).max()
-    # num_wstacks = int(max(num_wstacks, torch.cuda.device_count()))
-    print(f"INFO: FOV in radians: {fov_radians}, max w value: {w_max:.4f}, number of w-stacks determined to be {num_wstacks} based on the FOV and max w value.", flush=True)
-    
-    w_center, w_stack_correct, w_stack_idx, meas_op = compute_w_stacks(data["w"], num_wstacks, param_measop, data)
-    w_stack_data = {
-        "w_center": w_center,
-        "corrections": w_stack_correct,
-        "stack_idx": w_stack_idx,
-        "meas_op": meas_op,
-    }
+    w_stack_data_list = compute_w_stacks(data, param_measop, devices)
+    del data["u"], data["v"], data["w"], data["nW"]
+    gc.collect()
+    torch.cuda.empty_cache()
+    _mem("after compute_w_stacks  (NUFFTs + corrections)", devices)
     
     from .mrop_ri_measurement_operator import create_meas_op_ROP as create_meas_op_ROP
     from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft
     nufft_op = create_meas_op_ROP(MeasOpPytorchFinufft)
 
     meas_op = nufft_op(
-        u=data["u"],
-        v=data["v"],
+        # u=data["u"],
+        # v=data["v"],
         flag=data["flag"],
         img_size=param_measop["img_size"],
-        natural_weight=data["nW"],
+        # natural_weight=data["nW"],
         image_weight=data["nWimag"],
-        device=param_measop["device"],
+        device=devices[0],
         dtype=param_measop["dtype"],
         num_chs=data["nFreqs"],
         ROP_param=param_measop["ROP_param"],
         real_flag=True,
-        w_stack_data=w_stack_data
+        w_stack_data=w_stack_data_list,
+        devices=devices
     )
     
-    from .mrop_ri_measurement_operator import weighting_correction
-    data, weight_corr = weighting_correction(data, param_measop["ROP_param"])
-    print(
-        f"INFO: Correction has been applied to the weighting for {param_measop['ROP_param']['ROP_type']}",
-        flush=True,
-    )
+    _mem("after nufft_op.__init__  (alpha,C_buf,flat_sym,wstack bufs)", devices)
+    
+    del data["flag"]
+    gc.collect()
+    torch.cuda.empty_cache()
+    _mem("after deleting raw flag tensor", devices)
     
     if param_measop["use_ROP"]:
+        original_data_size = data["y"].numel()
         print(f"INFO: data size before {param_measop['ROP_param']['ROP_type']} is {data['y'].numel()}", flush=True)
         if param_measop["ROP_param"]["ROP_type"] in ["MROP", "MROP_gaussian"]:
-            data["y"] = meas_op.MD(data["y"] * weight_corr)
+            # data["y"] = meas_op.MD(data["y"] * weight_corr)
+            data["y"] = meas_op.compress_data(data["y"], weight=weight_corr)
         elif param_measop["ROP_param"]["ROP_type"] == "CROP":
             data["y"] = meas_op.D(data["y"] * weight_corr)
         print(f"INFO: data size after {param_measop['ROP_param']['ROP_type']} is {data['y'].numel()}", flush=True)
+        print(f"INFO: compression ratio is {original_data_size / data['y'].numel()}", flush=True)
     
-    # meas_op = MeasOpPytorchFinufftWStacking(
-    #     u=data["u"],
-    #     v=data["v"],
-    #     w=data["w"],
-    #     image_pixel_size=param_measop["im_pixel_size"],
-    #     num_wstacks=num_wstacks,
-    #     img_size=param_measop["img_size"],
-    #     natural_weight=data["nW"],
-    #     image_weight=data["nWimag"],
-    #     real_flag=True,
-    #     device=param_measop["device"],
-    #     device_list=[param_measop["device"]],
-    #     dtype=param_measop["dtype"],
-    #     kmeans_pkg="sklearn",
-    # )
-    
-    # y = [
-    #     (
-    #         data["y"][..., meas_op._w_stack_idx == i]
-    #         * data["nW"][..., meas_op._w_stack_idx == i]
-    #         * data["nWimag"][..., meas_op._w_stack_idx == i]
-    #     )
-    #     .to(meas_op._device[i])
-    #     .view(1, 1, -1)
-    #     for i in range(num_wstacks)
-    # ]
-    # torch.cuda.synchronize()
-    # torch.cuda.empty_cache()
+    gc.collect()
+    torch.cuda.empty_cache()
+    _mem("after MD() compression  (temporaries Z,Y,y_triu peak here)", devices)
     
     meas_op_approx = None
     if param_optimiser["approx_meas_op"]:
@@ -287,6 +285,7 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
             dtype=param_proxop["dtype"],
             verbose=param_proxop["verbose"],
         )
+        _mem("after ProxOpSARAPos.__init__  (dual/weights/psit 1D bufs)", devices)
 
         optimiser = FBSARA(
             data["y"],
@@ -306,17 +305,22 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
             reweight_save=param_optimiser["reweighting_save"],
             verbose=param_optimiser["verbose"],
         )
+        _mem("after FBSARA.__init__  (dual/weights/psit 1D bufs)", devices)
 
     # imaging
     if param_optimiser["flag_imaging"]:
         # initialisation
+        torch.cuda.empty_cache()
+        _mem("before initialisation() after cache clear", devices)
         optimiser.initialisation()
-        
+        _mem("after initialisation()  (op_norm power iteration)", devices)
+
         #! DEBUG: run measurement operator and adjoint to check correctness
         from src.mrop_ri_measurement_operator.test_meas_op import test_adjoint_op
         test_adjoint_op(meas_op, param_measop["img_size"], param_measop["dtype"])
-            
+        
         # run imaging loop
+        _mem("before imaging loop", devices)
         optimiser.run()
         # finalisation
         optimiser.finalisation()
@@ -354,13 +358,9 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
                     "INFO: The signal-to-noise ratio of the final",
                     f"reconstructed image is {rsnr} dB",
                 )
-
-        # Get peak memory active (tensors currently in memory)
-        max_allocated = torch.cuda.max_memory_allocated()
-
-        # Get peak memory reserved (total cache memory allocated from the driver)
-        max_reserved = torch.cuda.max_memory_reserved()
-
-        # Convert bytes to Megabytes (MB) where \(1\text{ MB} = 1024^2\text{ bytes}\)
-        print(f"Max GPU memory allocated: {max_allocated / (1024 ** 2):.2f} MB")
-        print(f"Max GPU memory reserved:  {max_reserved / (1024 ** 2):.2f} MB")
+        
+        for idx, dev in enumerate(devices):
+            free, total = torch.cuda.mem_get_info(dev)
+            driver_used = (total - free) / 1024**3
+            torch_reserved = torch.cuda.memory_reserved(dev) / 1024**3
+            print(f"dev={idx} driver_used={driver_used:.2f} GB torch_reserved={torch_reserved:.2f} GB non-torch={driver_used - torch_reserved:.2f} GB")

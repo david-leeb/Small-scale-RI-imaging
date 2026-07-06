@@ -97,6 +97,15 @@ def load_real_data_to_tensor(
     nW = np.concatenate([r["nW"] for r in channel_results])
     flags = np.concatenate([r["ch_flag"] for r in channel_results])
     
+    chan_counts = np.array([r["u"].size for r in channel_results], dtype=np.int64)
+    chan_offsets = np.concatenate([[0], np.cumsum(chan_counts)])
+
+    print(
+        f"INFO: Per-channel visibility counts range from {chan_counts.min()} to "
+        f"{chan_counts.max()} (mean {chan_counts.mean():.1f}).",
+        flush=True,
+    )
+    
     data_size = data.size
     print(
         f"INFO: Total number of visibilities: {data_size}, with {num_channels} frequency channels ({freq_num} to {freq_num + num_channels - 1}).",
@@ -141,6 +150,7 @@ def load_real_data_to_tensor(
     data_dict["y"] = torch.tensor(data, dtype=c_dtype, device=device).view(1, 1, -1)
     data_dict["flag"] = torch.tensor(flags, dtype=dtype, device=device).view(1, 1, -1)
     data_dict["nFreqs"] = len(freqs)
+    data_dict["chan_offsets"] = chan_offsets
 
     del u_cat, v_cat, w_cat, data, nW
     gc.collect()

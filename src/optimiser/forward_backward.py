@@ -65,9 +65,9 @@ class ForwardBackward(Optimiser):
         # cuda event
         self._forward_cuda_timing = False
         self._backward_cuda_timing = False
-        if self._meas_op.get_device() == torch.device("cuda"):
+        if self._meas_op.get_device().type == "cuda":
             self._forward_cuda_timing = True
-        if self._prox_op.get_device() == torch.device("cuda"):
+        if self._prox_op.get_device().type == "cuda":
             self._backward_cuda_timing = True
 
         # save dirty image and psf
@@ -108,7 +108,7 @@ class ForwardBackward(Optimiser):
             backward_start_event = torch.cuda.Event(enable_timing=True)
             backward_end_event = torch.cuda.Event(enable_timing=True)
             torch.cuda.synchronize()
-
+            
         self._t_total = timer()
         for self._iter in range(self._start_iter, self._im_max_itr):
             self._t_iter = timer()

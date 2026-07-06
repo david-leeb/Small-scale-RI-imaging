@@ -60,10 +60,6 @@ def _traceable_waverec2(coeffs: List[torch.Tensor], wavelet: tuple) -> torch.Ten
             unstacked_coeffs.append(tuple(torch.unbind(c, dim=0)))
     return ptwt.waverec2(unstacked_coeffs, wavelet)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Type aliases (unchanged from original)
-# ─────────────────────────────────────────────────────────────────────────────
-
 WaveletCoeff = List[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]
 WaveletDictCoeff = List[Union[WaveletCoeff, torch.Tensor]]
 

@@ -98,7 +98,7 @@ class FBSARA(ForwardBackward):
         self._t_iter_outer = 0.0
         self._im_rel_var = 1.0
         self._im_rel_var_outer = 1.0
-
+        
     def initialisation(self) -> None:
         """
         Initialises specific parameters of uSARA.
