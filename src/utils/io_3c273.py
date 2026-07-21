@@ -51,8 +51,13 @@ def load_data_to_tensor(
                 else:
                     print("Type not implemented to be read here", h5obj)
     else:
+        print("THIS PATH")
         loadmat(main_data_file, mdict=data_holo)
 
+    msSpecs = loadmat(os.path.join(data_path, "msSpecs.mat"))
+    print("msSpecs keys:", list(msSpecs.keys()))
+    print("data_holo keys:", list(data_holo.keys()))
+    
     if freq_num is not None:
         if nfreqs is None:
             freqs = [data_holo["freqs"].squeeze()[freq_num - 1]]
@@ -92,6 +97,9 @@ def load_data_to_tensor(
         counter = 0
         for i_f, f in enumerate(freqs):
             data_tmp = loadmat(os.path.join(data_path, f"273-X08_data_ch_{i_f+1}.mat"))
+            
+            print(f"Channel {i_f+1} keys:", list(data_tmp.keys()))
+            
             if i_f == 0:
                 data["B_per_ch"] = len(np.unique(data_tmp["batches_flagged"]))
             new_counter = counter + data_tmp["data_I"].size

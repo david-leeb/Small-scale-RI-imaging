@@ -136,7 +136,7 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
             from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft
             from .mrop_ri_measurement_operator import create_meas_op_ROP as create_meas_op_ROP
         nufft_op = create_meas_op_ROP(MeasOpPytorchFinufft)
-
+    
     meas_op = nufft_op(
         u=data["u"],
         v=data["v"],

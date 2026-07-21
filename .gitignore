@@ -33,6 +33,7 @@ logs/
 *.csv
 *.json
 *.tar
+*.pt
 
 # Nsys
 nsys_bin

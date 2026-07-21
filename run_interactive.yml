@@ -14,7 +14,7 @@ spec:
         eidf/user: s2908448-aspp
     spec:
       restartPolicy: Never
-      activeDeadlineSeconds: 12000
+      activeDeadlineSeconds: 42000
       securityContext:
         fsGroup: 3607
       containers:
@@ -26,11 +26,11 @@ spec:
         args: ["/bin/bash"]
         resources:
           requests:
-            cpu: 32
-            memory: '32Gi'
+            cpu: 64
+            memory: '128Gi'
           limits:
-            cpu: 32
-            memory: '32Gi'
+            cpu: 64
+            memory: '128Gi'
             nvidia.com/gpu: 1
         volumeMounts:
           - mountPath: /mnt/pvc
@@ -51,8 +51,8 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 16Gi
+            sizeLimit: 64Gi
       nodeSelector:
-        # nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
         # nvidia.com/gpu.product: NVIDIA-A100-SXM4-40GB
-        nvidia.com/gpu.product: NVIDIA-A100-SXM4-40GB-MIG-1g.5gb
+        # nvidia.com/gpu.product: NVIDIA-A100-SXM4-40GB-MIG-1g.5gb

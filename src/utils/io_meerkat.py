@@ -16,6 +16,10 @@ def _load_single_channel(args):
     uvw = loadmat(os.path.join(data_path, "msSpecs.mat"))["uvw"]
     u, v, w = uvw[:, 0], uvw[:, 1], uvw[:, 2]
     
+    msSpecs = loadmat(os.path.join(data_path, "msSpecs.mat"))
+    print("msSpecs keys:", list(msSpecs.keys()))
+    print(f"Channel {ch_idx+1} keys:", list(ch_data.keys()))
+    
     if ch_data["data_I"].size > 0:
         return {
             "u": u[ch_flag] / wavelength,
@@ -26,6 +30,7 @@ def _load_single_channel(args):
             "ch_flag": ch_flag
         }
     else:
+        print(f"WARNING: Channel {ch_idx+1} data is None. Skipping this channel.")
         return None
 
 def load_real_data_to_tensor(
@@ -58,9 +63,6 @@ def load_real_data_to_tensor(
     c_dtype = torch.complex128
 
     msSpecs = loadmat(os.path.join(data_path, "msSpecs.mat"))
-    # u = msSpecs["uvw"][:, 0]
-    # v = msSpecs["uvw"][:, 1]
-    # w = msSpecs["uvw"][:, 2]
     
     freqs = msSpecs["freqs"].squeeze()[freq_num : freq_num + nfreqs]
     
@@ -86,6 +88,9 @@ def load_real_data_to_tensor(
     
     # Filter out None results and concatenate
     channel_results = [r for r in channel_results if r is not None]
+    
+    # Update channel count after filtering
+    num_channels = len(channel_results)
     
     if len(channel_results) == 0:
         raise ValueError("No valid data found in any channel")
@@ -149,7 +154,7 @@ def load_real_data_to_tensor(
     data_dict["nW"] = torch.tensor(nW, dtype=dtype, device=device).view(1, 1, -1)
     data_dict["y"] = torch.tensor(data, dtype=c_dtype, device=device).view(1, 1, -1)
     data_dict["flag"] = torch.tensor(flags, dtype=dtype, device=device).view(1, 1, -1)
-    data_dict["nFreqs"] = len(freqs)
+    data_dict["nFreqs"] = num_channels
     data_dict["chan_offsets"] = chan_offsets
 
     del u_cat, v_cat, w_cat, data, nW

@@ -15,7 +15,7 @@ import torch
 from more_itertools import grouper
 from typing_extensions import ParamSpec, TypeVar
 
-from .constants import (
+from ptwt_constants import (
     SUPPORTED_DTYPES,
     BoundaryMode,
     OrthogonalizeMethod,

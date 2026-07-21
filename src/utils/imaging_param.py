@@ -70,6 +70,7 @@ def set_imaging_params_ri(
         
     param_measop["nfreqs"] = param_general.get("nfreqs", None)
     param_measop["freq_num"] = param_general.get("freq_num", None)
+    param_measop["Q"] = param_general.get("Q", None)
 
     # image pixel size
     if param_general.get("im_pixel_size", None) and param_general["im_pixel_size"] > 0.0:
@@ -385,7 +386,11 @@ def set_imaging_params_ri(
     elif param_optimiser["algorithm"] == "cairi":
         file_prefix = "cAIRI_heuScale_" + str(param_optimiser["heu_noise_scale"]) + "_"
     elif param_optimiser["algorithm"] == "usara":
-        file_prefix = "uSARA_heuRegScale_" + str(param_optimiser["heu_reg_param_scale"]) + "_"
+        file_prefix = (
+            "uSARA_heuRegScale_" + str(param_optimiser["heu_reg_param_scale"]) + "_"  
+            + "N_ratio" + "_" + str(param_general["ROP_N_ratio"]) + "_"
+            + "epsilon_n" + "_" + str(param_general["ROP_epsilon_n"]) + "_"
+        )
     if param_general.get("run_id", None):
         file_prefix += "runID_" + str(param_general["run_id"]) + "_"
     param_optimiser["file_prefix"] = file_prefix

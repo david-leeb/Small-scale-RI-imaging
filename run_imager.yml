@@ -29,14 +29,14 @@ spec:
           LOG_FILE="logs/output_$(date +%Y%m%d_%H%M%S).log"
           
           echo -e "\n=== Starting MROP Imaging ===" >> "$LOG_FILE" 2>&1
-          python run_imager_meerkat_wstacking.py -c "config/meerkat_central_10chs_2048.json" >> "$LOG_FILE" 2>&1
+          python run_imager_combined.py -c "config/meerkat_central_220chs_2048_mrop.json" >> "$LOG_FILE" 2>&1
         resources:
           requests:
-            cpu: 32
-            memory: '32Gi'
+            cpu: 64
+            memory: '128Gi'
           limits:
-            cpu: 32
-            memory: '32Gi'
+            cpu: 64
+            memory: '128Gi'
             nvidia.com/gpu: 4
         volumeMounts:
           - mountPath: /mnt/pvc
@@ -57,6 +57,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 16Gi
+            sizeLimit: 64Gi
       nodeSelector:
-        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+        # nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+        nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB

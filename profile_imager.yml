@@ -33,7 +33,7 @@ spec:
           # --- PROFILE MROP IMAGING ---
           echo -e "\n=== Starting Profiling: MROP Config ===" >> "$LOG_FILE" 2>&1
           nsys profile \
-            --trace=cuda,nvtx,osrt \
+            --trace=cuda,nvtx \
             --cuda-memory-usage=true \
             --output="logs_profiling/nsys_mrop_${RUN_TIME}" \
             --export=sqlite \
@@ -41,12 +41,12 @@ spec:
             python run_imager_meerkat_wstacking.py -c "config/meerkat_central_10chs_2048_profile.json" >> "$LOG_FILE" 2>&1
         resources:
           requests:
-            cpu: 32
-            memory: '32Gi'
+            cpu: 64
+            memory: '128Gi'
           limits:
-            cpu: 32
-            memory: '32Gi'
-            nvidia.com/gpu: 1
+            cpu: 64
+            memory: '128Gi'
+            nvidia.com/gpu: 4
         volumeMounts:
           - mountPath: /mnt/pvc
             name: volume
@@ -66,6 +66,6 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 16Gi
+            sizeLimit: 64Gi
       nodeSelector:
         nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
