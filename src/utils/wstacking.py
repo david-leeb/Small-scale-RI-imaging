@@ -1,14 +1,10 @@
-from asyncio import futures
 from typing import Tuple, Union
 import torch
-import gc, os
 import numpy as np
-import datetime
 import math
 from sklearn.cluster import KMeans
 
-from src.ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft
-from src.utils.gpu_utils import assign_channels_striped
+from src.ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft, SharedNUFFTPlanPair
 
 def get_n_term(
     img_size: Tuple[int, int],
@@ -39,24 +35,63 @@ def get_n_term(
     m_grid = m_grid * dm_grid
     return torch.sqrt(1 - l_grid**2 - m_grid**2).reshape(1, 1, *img_size)
 
-def process_device(d, dev, data, param_measop, fov_radians, channel_lists, n_dev):
-    
-    chs = channel_lists[d]
-    print(f"INFO: Device {d} ({dev}) will process channels {chs}", flush=True)
+def process_device_global(d, dev, data, param_measop, fov_radians, num_wstacks, w_center):
 
     data_i = {
         "u": data["u_dev"][d],
         "v": data["v_dev"][d],
-        "w": data["w_dev"][d],
+    }
+    w_stack_idx = data["stack_idx_dev"][d].to(dev).view(-1)
+    w_center = w_center.to(dev)
+    
+    # create w-stacking correction term
+    n_term = get_n_term(param_measop["img_size"], fov_radians, dev, param_measop["dtype"])
+
+    # Precompute per-stack w-corrections
+    w_stack_correct = [
+        torch.exp(-2j * torch.pi * w_center[i] * (n_term - 1)) / n_term
+        for i in range(num_wstacks)
+    ]
+    
+    plan_pair = SharedNUFFTPlanPair(param_measop["img_size"], param_measop["dtype"], dev)
+
+    meas_op = [None] * num_wstacks
+    for i in range(num_wstacks):
+        meas_op[i] = MeasOpPytorchFinufft(
+            u=data_i["u"][:, :, w_stack_idx == i],
+            v=data_i["v"][:, :, w_stack_idx == i],
+            img_size=param_measop["img_size"],
+            real_flag=True,
+            dtype=param_measop["dtype"],
+            device=dev,
+            shared_plan_pair=plan_pair,
+        )
+
+    w_stack_data = {
+        "w_center": w_center,
+        "corrections": w_stack_correct,
+        "stack_idx": w_stack_idx,
+        "meas_op": meas_op,
+        "plan_pair": plan_pair,
     }
     
-    w = data_i["w"]
-    w_np = w.numpy(force=True).reshape(-1, 1)
+    return w_stack_data
+
+def compute_global_w_stacking(data, param_measop):
+    
+    # Compute field of view
+    fov_radians = (
+        (data["image_pixel_size"] / 3600) * param_measop["img_size"][0] * np.pi / 180,
+        (data["image_pixel_size"] / 3600) * param_measop["img_size"][1] * np.pi / 180,
+    )
+    
+    w = data["w"].numpy(force=True).reshape(-1, 1)
     
     num_wstacks = int(np.ceil(
-        w_np.max() * 2 * np.pi * (1 - np.sqrt(1 - 2 * np.sin(fov_radians[0] / 2) ** 2)))
+        w.max() * 2 * np.pi * (1 - np.sqrt(1 - 2 * np.sin(fov_radians[0] / 2) ** 2)))
     )
-    print(f"INFO: FOV in radians: {fov_radians}, max w value: {w_np.max():.4f}, number of w-stacks determined to be {num_wstacks} based on the FOV and max w value.", flush=True)
+    
+    print(f"INFO: FOV in radians: {fov_radians}, max w value: {w.max():.4f}, number of w-stacks determined to be {num_wstacks} based on the FOV and max w value.", flush=True)
     
     # search for centres of w planes
     # parameters for k-means clustering, hard-coded for now
@@ -65,15 +100,11 @@ def process_device(d, dev, data, param_measop, fov_radians, channel_lists, n_dev
     kmeans_max_iter = 1000
 
     # run k-means on a subset of w values
-    kmeans_num_pts = min(int(kmeans_frac_pts * w_np.size), kmeans_max_pts)
+    kmeans_num_pts = min(int(kmeans_frac_pts * w.size), kmeans_max_pts)
 
     np.random.seed(42)
-
-    idx = np.random.choice(w_np.size, kmeans_num_pts, replace=False)
-
-    w_sampled = w_np[idx]
-
-    w_kmeans = w_sampled.reshape(-1, 1)
+    idx = np.random.choice(w.size, kmeans_num_pts, replace=False)
+    w_kmeans = w[idx].reshape(-1, 1)
 
     kmeans = KMeans(
         n_clusters=num_wstacks,
@@ -84,69 +115,35 @@ def process_device(d, dev, data, param_measop, fov_radians, channel_lists, n_dev
     )
     
     kmeans.fit(w_kmeans)
-    labels = kmeans.predict(w_np)
-    centers = np.sort(kmeans.cluster_centers_, axis=0)
+    centers = np.sort(kmeans.cluster_centers_, axis=0).ravel()
     
-    # move results to device
-    w_center = torch.as_tensor(centers, dtype=param_measop["dtype"], device=dev).view(-1)
-    w_stack_idx = torch.as_tensor(labels, dtype=torch.int32, device=dev).view(-1)
-
-    del w_kmeans, kmeans, labels, centers
-    gc.collect()
+    #! CHECK THIS
+    # labels = kmeans.predict(w)
+    w_flat = w.ravel()
+    idx_right = np.clip(np.searchsorted(centers, w_flat), 0, len(centers) - 1)
+    idx_left = np.clip(idx_right - 1, 0, len(centers) - 1)
+    choose_right = np.abs(w_flat - centers[idx_right]) < np.abs(w_flat - centers[idx_left])
+    labels = np.where(choose_right, idx_right, idx_left)
 
     print("INFO: w-stacking centers: ", end="")
-    w_center_np = w_center.numpy(force=True).ravel()
     for i in range(num_wstacks):
-        print(f"{w_center_np[i]:.7f}, ", end="")
+        print(f"{centers[i].item():.7f}, ", end="")
     print("", flush=True)
-
-    # create w-stacking correction term
-    n_term = get_n_term(param_measop["img_size"], fov_radians, dev, param_measop["dtype"])
-
-    # Precompute per-stack w-corrections
-    w_stack_correct = [
-        torch.exp(-2j * torch.pi * w_center[i] * (n_term - 1)) / n_term
-        for i in range(num_wstacks)
-    ]
     
-    meas_op = [None] * num_wstacks
-    for i in range(num_wstacks):
-        meas_op[i] = MeasOpPytorchFinufft(
-            u=data_i["u"][:, :, w_stack_idx == i],
-            v=data_i["v"][:, :, w_stack_idx == i],
-            img_size=param_measop["img_size"],
-            real_flag=True,
-            dtype=param_measop["dtype"],
-            device=dev,
-        )
+    data["w_center"] = torch.tensor(centers, dtype=param_measop["dtype"], device=torch.device("cpu")).view(-1)
+    data["stack_idx"] = torch.as_tensor(labels, dtype=torch.int32, device=torch.device("cpu")).view(1, 1, -1)
+    data["num_wstacks"] = num_wstacks
+    data["fov_radians"] = fov_radians
+    return data
 
-    w_stack_data = {
-        "w_center": w_center,
-        "corrections": w_stack_correct,
-        "stack_idx": w_stack_idx,
-        "meas_op": meas_op,
-    }
-    
-    return w_stack_data
-    
 def compute_w_stacks(data, param_measop, devices):
-    
-    # Set up multi GPU parameters
-    n_dev = len(devices)
-    num_chs = data["nFreqs"]
-    channel_lists = assign_channels_striped(num_chs, n_dev)
-    
-    # Compute field of view
-    fov_radians = (
-        (data["image_pixel_size"] / 3600) * param_measop["img_size"][0] * np.pi / 180,
-        (data["image_pixel_size"] / 3600) * param_measop["img_size"][1] * np.pi / 180,
-    )
-    
-    w_stack_data_list = []
-    for d, dev in enumerate(devices):
-        result = process_device(d, dev, data, param_measop, fov_radians, channel_lists, n_dev)
-        w_stack_data_list.append(result)
-    
+    w_stack_data_list = [
+        process_device_global(
+            d, dev, data, param_measop,
+            data["fov_radians"], data["num_wstacks"], data["w_center"],
+        )
+        for d, dev in enumerate(devices)
+    ]
     return w_stack_data_list
 
 def compute_single_stack(data, param_measop, devices):

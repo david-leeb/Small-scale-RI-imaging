@@ -83,11 +83,17 @@ def load_dataset(
     freqs = msSpecs["freqs"].squeeze()[freq_num : freq_num + nfreqs]
     num_channels = freqs.size
     
+    print(
+        f"INFO: Frequency range: {freqs.min()/1e6:.4f} MHz to {freqs.max()/1e6:.4f} MHz "
+        f"({num_channels} channels).",
+        flush=True,
+    )
+    
     channel_files = _find_channel_files(data_path)
     
     workers = num_workers or min(cpu_count(), num_channels)
     channel_args = [
-        (i, speed_of_light / freqs[i], channel_files[i], data_path, Q)
+        (freq_num + i, speed_of_light / freqs[i], channel_files[freq_num + i], data_path, Q)
         for i in range(num_channels)
     ]
     with Pool(workers) as pool:
@@ -139,7 +145,6 @@ def load_dataset(
         )
 
     data_dict["image_pixel_size"] = image_pixel_size
-    # image_pixel_size = (180.0 / np.pi) * 3600.0 / (super_resolution * spatial_bandwidth)
     super_resolution = (180.0 / np.pi) * 3600.0 / (image_pixel_size * spatial_bandwidth)
     print(f"INFO: super resolution factor: {super_resolution:.4f}", flush=True)
     halfSpatialBandwidth = (180.0 / np.pi) * 3600.0 / (image_pixel_size) / 2.0
@@ -181,7 +186,7 @@ def load_dataset(
         print(f"INFO: Applied phase-center shift dl={dl_shift}, dm={dm_shift}", flush=True)
 
     if data_weighting and weight_type in ["uniform", "briggs"]:
-        from pysrc.utils.gen_imaging_weights import gen_imaging_weights
+        from src.ri_measurement_operator.pysrc.utils.gen_imaging_weights import gen_imaging_weights
 
         # compute imaging weights accordingly to the specified weighting scheme
         print("INFO: computing imaging weights...", flush=True)

@@ -6,13 +6,14 @@ import pywt
 import torch
 import torch.nn.functional as F
 
-from ptwt_utils import (
+torch.backends.cudnn.allow_tf32 = False
+torch.backends.cuda.matmul.allow_tf32 = False
+
+from .ptwt_utils import (
     _adjust_padding_at_reconstruction,
-    _check_same_device_dtype,
-    _construct_2d_filt,
     _get_filter_tensors,
 )
-from ptwt_constants import Wavelet
+from .ptwt_constants import Wavelet
 
 Schedule = List[Tuple[int, int, int, int]]  # (padl, padr, padt, padb) per level
 

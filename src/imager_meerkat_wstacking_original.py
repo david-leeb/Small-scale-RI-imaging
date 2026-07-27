@@ -6,23 +6,19 @@ from typing import Dict
 import torch
 import numpy as np
 from astropy.io import fits
-
 import gc
-import os
 
 from .prox_operator import ProxOpAIRI, ProxOpElipse, ProxOpSARAPos
-from .optimiser import FBAIRI, PDAIRI, FBSARA
+from .optimiser import FBAIRI, PDAIRI, FBSARAMEERKAT
 from .utils import gen_imaging_weight
-from .utils.io_combined import load_dataset
-from .utils.wstacking import compute_w_stacks, compute_single_stack, compute_global_w_stacking
-from src.mrop_ri_measurement_operator.src.utils.solve_epsilon_new import solve_epsilon_same_aa
-from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft
-from .utils.gpu_utils import mem, send_to_devices
 
-# torch.set_float32_matmul_precision('high')
+# from .ri_measurement_operator.pysrc.utils.io import load_data_to_tensor
+# from .ri_measurement_operator.pysrc.utils.io_new import load_data_to_tensor
+from .utils.io_meerkat_original import load_real_data_to_tensor
+from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft_wstacking import (
+    MeasOpPytorchFinufftWStacking,
+)
 
-torch.backends.cudnn.allow_tf32 = False
-torch.backends.cuda.matmul.allow_tf32 = False
 
 def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> None:
     """
@@ -46,122 +42,100 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
             It includes parameters like 'dnn_shelf_path', 'dnn_apply_transform', 'device', 'dtype',
             and 'verbose'.
     """
-    
-    torch.cuda.reset_peak_memory_stats()
-    
-    device = param_measop["device"]
-    devices = None
-    if device == torch.device("cuda"):
-        devices = [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
-        print("INFO: Detected", len(devices), "GPUs")
-
     # initialisation
-    data = load_dataset(
+
+    # data = load_data_to_tensor(
+    #     param_optimiser["data_file"],
+    #     super_resolution=param_measop["superresolution"],
+    #     image_pixel_size=param_measop["im_pixel_size"],
+    #     data_weighting=param_measop["flag_data_weighting"],
+    #     load_weight=param_measop["weight_load"],
+    #     img_size=param_measop["img_size"],
+    #     uv_unit="radians",
+    #     weight_type=param_measop["weight_type"],
+    #     # weight_gridsize=param_measop["weight_gridsize"],
+    #     weight_robustness=param_measop["weight_robustness"],
+    #     dtype=param_measop["dtype"],
+    #     device=param_measop["device"],
+    #     verbose=param_optimiser["verbose"],
+    # )
+
+    data = load_real_data_to_tensor(
         data_path=param_optimiser["data_file"],
-        Q=param_measop["Q"],
-        super_resolution=param_measop["superresolution"],
+        # super_resolution=args.super_resolution,
         image_pixel_size=param_measop["im_pixel_size"],
         img_size=param_measop["img_size"],
-        nfreqs=param_measop["nfreqs"],
-        freq_num=param_measop["freq_num"],
+        start_ch=95,
+        end_ch=125,
         data_weighting=param_measop["flag_data_weighting"],
         weight_type=param_measop["weight_type"],
         weight_robustness=param_measop["weight_robustness"],
-        # vis_remove=17.7,
-        dl_shift=param_measop["dl_shift"],
-        dm_shift=param_measop["dm_shift"],
-        dtype=param_measop["dtype"],
-        device=torch.device("cpu"),
     )
-    
-    weight_corr = None
-    if param_measop["use_ROP"]:
-        if param_measop["ROP_param"]["Q"] is None:
-            assert "Q" in data, "number of anntennas Q is not in data and not provided"
-            param_measop["ROP_param"]["Q"] = int(data["Q"])
 
-        N = int(np.prod(param_measop["img_size"]))
-        K = int(data["nFreqs"])
-        V = int(param_measop["ROP_param"]["Q"] * (param_measop["ROP_param"]["Q"] - 1) // 2)
-            
-        if param_measop["ROP_param"]["B"] is None:
-            if "flag" in data and data["flag"] is not None and "B" not in data:
-                data["B"] = data["flag"].shape[-1] / V
-            assert "B" in data, "number of snapshots B is not in data and not provided"
-            param_measop["ROP_param"]["B"] = int(data["B"])
-            print("INFO: B set to ", int(data["B"]))
-            
-        param_measop["im_pixel_size"] = data["image_pixel_size"]
-        
-        B = int(data["B"] / data["nFreqs"])
-        Q = int(param_measop["ROP_param"]["Q"])
-        
-        print(f"INFO: Original dimensions: N = {N}, Q = {Q}, K = {K}, B = {B}, N_ratio = {param_measop["ROP_param"]["N_ratio"]}.")
-        epsilon, P_Q, M_B, M_K = solve_epsilon_same_aa(N, param_measop["ROP_param"]["Q"], B, K, N_ratio=param_measop["ROP_param"]["N_ratio"], n=param_measop["ROP_param"]["epsilon_n"], verbose=True)
-        print(f"INFO: Calculated epsilon for MROP modulation dimensions: {epsilon:.4f} (epsilon = (N / Q^2VK)^(1/4)).")
-        #! DEBUG
-        # M_K = 50
-        # M_B = 721
-        # P_Q = 32
-        
-        param_measop["ROP_param"]["M_K"] = M_K
-        param_measop["ROP_param"]["M_B"] = M_B
-        param_measop["ROP_param"]["P"] = P_Q 
-        param_measop["ROP_param"]["M"] = M_K * M_B
-        print(f"INFO: MROP set with P = {param_measop["ROP_param"]["P"]}, M_K = {param_measop["ROP_param"]["M_K"]}, M_B = {param_measop["ROP_param"]["M_B"]}, M = {param_measop["ROP_param"]["M"]}.")
-        print(f"INFO: PM / N = {param_measop["ROP_param"]["P"] * param_measop["ROP_param"]["M"] / N:.4f}", flush=True)
-        
-        from .mrop_ri_measurement_operator import weighting_correction
-        data, weight_corr = weighting_correction(data, param_measop["ROP_param"], rapha=True)
-        print(
-            f"INFO: Correction has been applied to the weighting for {param_measop['ROP_param']['ROP_type']}",
-            flush=True,
-        )
-        gc.collect()
-        torch.cuda.empty_cache()
-    
-    data["y"] = data["y"] * data["nW"] * data["nWimag"]
-    
-    data = compute_global_w_stacking(data, param_measop)
-    data = send_to_devices(data, devices)
-    gc.collect()
-    
-    param_measop["w_stacking"] = True
-    if param_measop["w_stacking"]:
-        w_stack_data_list = compute_w_stacks(data, param_measop, devices)
-    else:
-        w_stack_data_list = compute_single_stack(data, param_measop, devices)
-    mem("after w-stack + measop construction", devices)
-    gc.collect()
-    torch.cuda.empty_cache()
-    
-    from .mrop_ri_measurement_operator import create_meas_op_ROP
-    nufft_op = create_meas_op_ROP(MeasOpPytorchFinufft)
-        
-    meas_op = nufft_op(
-        img_size=param_measop["img_size"],
-        w_stack_data=w_stack_data_list,
-        num_chs=data["nFreqs"],
-        use_ROP=param_measop["use_ROP"],
-        devices=devices,
-        ROP_param=param_measop["ROP_param"] if param_measop["use_ROP"] else None,
-        ant1=data["ant1"],
-        ant2=data["ant2"],
-        batches=data["batches"],
-        natural_weight_dev=data["nW_dev"],
-        image_weight_dev=data["nWimag_dev"],
-        device=devices[0],
-        dtype=param_measop["dtype"],
-        real_flag=True,
+    fov_radians = (
+        (data["image_pixel_size"] / 3600) * param_measop["img_size"][0] * np.pi / 180,
+        (data["image_pixel_size"] / 3600) * param_measop["img_size"][1] * np.pi / 180,
     )
-    
-    data["y"] = meas_op.prepare_or_compress_data(data["y_dev"])
-    # data["y"] = meas_op.prepare_or_compress_data(data["y_dev"], weight=weight_corr)
-    
-    del data["u_dev"], data["v_dev"], data["w_dev"], data["nW_dev"], data["nWimag_dev"], data["y_dev"]
-    gc.collect()
+
+    num_wstacks = np.ceil(
+        data["w"].numpy(force=True).max() * 2 * np.pi * (1 - np.sqrt(1 - 2 * np.sin(fov_radians[0] / 2) ** 2))
+    )
+    w_max = data["w"].numpy(force=True).max()
+    num_wstacks = int(max(num_wstacks, torch.cuda.device_count()))
+    print(
+        f"INFO: FOV in radians: {fov_radians}, max w value: {w_max:.4f}, number of w-stacks determined to be {num_wstacks} based on the FOV and max w value.",
+        flush=True,
+    )
+    assert torch.cuda.is_available()
+    num_gpus = torch.cuda.device_count()
+    print(f"Found {num_gpus} GPUs")
+
+    # meas_op = None
+    meas_op = MeasOpPytorchFinufftWStacking(
+        u=data["u"],
+        v=data["v"],
+        w=data["w"],
+        image_pixel_size=param_measop["im_pixel_size"],
+        wcentres_mat_file=param_measop["wcentres_mat_file"],
+        num_wstacks=num_wstacks,
+        img_size=param_measop["img_size"],
+        natural_weight=data["nW"],
+        image_weight=data["nWimag"],
+        real_flag=True,
+        device=param_measop["device"],
+        device_list=[param_measop["device"]],
+        dtype=param_measop["dtype"],
+        kmeans_pkg="sklearn",
+    )
+    # .pin_memory().to(device=device, non_blocking=True).view(1, 1, -1)
+    num_wstacks = meas_op._num_wstacks
+    y = [
+        data["y"][..., meas_op._w_stack_idx == i]
+        .pin_memory()
+        .to(meas_op._device[i], non_blocking=True)
+        .view(1, 1, -1)
+        for i in range(num_wstacks)
+    ]
+
+    nW = [
+        data["nW"][..., meas_op._w_stack_idx == i]
+        .pin_memory()
+        # .to(meas_op._device[i], non_blocking=True)
+        .view(1, 1, -1)
+        for i in range(num_wstacks)
+    ]
+
+    nWimag = [
+        data["nWimag"][..., meas_op._w_stack_idx == i]
+        .pin_memory()
+        # .to(meas_op._device[i], non_blocking=True)
+        .view(1, 1, -1)
+        for i in range(num_wstacks)
+    ]
+
+    torch.cuda.synchronize()
     torch.cuda.empty_cache()
-    
+
     meas_op_approx = None
     if param_optimiser["approx_meas_op"]:
         from .ri_measurement_operator.pysrc.measOperator.meas_op_PSF import MeasOpPSF
@@ -178,6 +152,10 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
             dtype=param_measop["dtype"],
         )
 
+    del data["u"], data["v"], data["nW"], data["nWimag"], data["w"], data["y"]
+    gc.collect()
+    torch.cuda.empty_cache()
+
     optimiser = None
     if param_optimiser["algorithm"] == "airi":
         prox_op_airi = ProxOpAIRI(
@@ -192,6 +170,10 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
             y,
             meas_op,
             prox_op_airi,
+            nW=nW,
+            nWimag=nWimag,
+            heu_corr_factor=param_measop["heu_corr_factor"],
+            meas_op_norm=param_measop["meas_op_norm"],
             meas_op_approx=meas_op_approx,
             im_min_itr=param_optimiser["im_min_itr"],
             im_max_itr=param_optimiser["im_max_itr"],
@@ -278,13 +260,15 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
             dtype=param_proxop["dtype"],
             verbose=param_proxop["verbose"],
         )
-        gc.collect()
-        torch.cuda.empty_cache()
 
-        optimiser = FBSARA(
-            data["y"],
+        optimiser = FBSARAMEERKAT(
+            y,
             meas_op,
             prox_op_sara,
+            nW=nW,
+            nWimag=nWimag,
+            heu_corr_factor=param_measop["heu_corr_factor"],
+            meas_op_norm=param_measop["meas_op_norm"],
             use_ROP=param_measop["use_ROP"],
             meas_op_approx=meas_op_approx,
             im_min_itr=param_optimiser["im_min_itr"],
@@ -299,18 +283,11 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
             reweight_save=param_optimiser["reweighting_save"],
             verbose=param_optimiser["verbose"],
         )
-        gc.collect()
-        torch.cuda.empty_cache()
 
     # imaging
     if param_optimiser["flag_imaging"]:
         # initialisation
         optimiser.initialisation()
-
-        #! DEBUG: run measurement operator and adjoint to check correctness
-        from src.mrop_ri_measurement_operator.test_meas_op import test_adjoint_op
-        test_adjoint_op(meas_op, param_measop["img_size"], param_measop["dtype"])
-        
         # run imaging loop
         optimiser.run()
         # finalisation
@@ -349,9 +326,3 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
                     "INFO: The signal-to-noise ratio of the final",
                     f"reconstructed image is {rsnr} dB",
                 )
-        
-        for idx, dev in enumerate(devices):
-            free, total = torch.cuda.mem_get_info(dev)
-            driver_used = (total - free) / 1024**3
-            torch_reserved = torch.cuda.memory_reserved(dev) / 1024**3
-            print(f"dev={idx} driver_used={driver_used:.2f} GB torch_reserved={torch_reserved:.2f} GB non-torch={driver_used - torch_reserved:.2f} GB")

@@ -29,7 +29,7 @@ spec:
           LOG_FILE="logs/output_$(date +%Y%m%d_%H%M%S).log"
           
           echo -e "\n=== Starting MROP Imaging ===" >> "$LOG_FILE" 2>&1
-          python run_imager_combined.py -c "config/meerkat_central_220chs_2048_mrop.json" >> "$LOG_FILE" 2>&1
+          python run_imager_combined.py -c "config/meerkat_central_220chs_4096_mrop.json" >> "$LOG_FILE" 2>&1
         resources:
           requests:
             cpu: 64
@@ -61,3 +61,4 @@ spec:
       nodeSelector:
         # nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
         nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+        # nvidia.com/gpu.product: NVIDIA-H200

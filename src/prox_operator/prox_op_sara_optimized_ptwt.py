@@ -7,12 +7,6 @@ import pywt
 import warnings
 
 from .prox_op import ProxOp
-from ._wavelet_test.wavelets_custom import (
-    prepare_wavedec2_new,
-    prepare_waverec2_new,
-    wavedec2_new,
-    waverec2_new,
-)
 
 @torch.compile
 def _primal_update_inplace(result, x, recon):
@@ -30,6 +24,25 @@ def _fused_1d_dual_update(dual_1d, psit_1d, weights_1d, sfth_val, norm_acc):
     dual_1d.copy_(tmp - torch.sign(tmp) * torch.clamp(torch.abs(tmp) - threshold, min=0.0))
     # Fused L1 Norm calculation
     norm_acc.copy_(torch.sum(torch.abs(psit_1d) * weights_1d))
+ 
+def _traceable_wavedec2(data: torch.Tensor, wavelet: tuple, level: int) -> List[torch.Tensor]:
+    coeff = ptwt.wavedec2(data, wavelet, level=level, mode="zero")
+    res = []
+    for c in coeff:
+        if isinstance(c, torch.Tensor):
+            res.append(c)
+        else:
+            res.append(torch.stack(c, dim=0))
+    return res
+
+def _traceable_waverec2(coeffs: List[torch.Tensor], wavelet: tuple) -> torch.Tensor:
+    unstacked_coeffs = []
+    for i, c in enumerate(coeffs):
+        if i == 0:
+            unstacked_coeffs.append(c)
+        else:
+            unstacked_coeffs.append(tuple(torch.unbind(c, dim=0)))
+    return ptwt.waverec2(unstacked_coeffs, wavelet)
 
 WaveletCoeff = List[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]
 WaveletDictCoeff = List[Union[WaveletCoeff, torch.Tensor]]
@@ -73,11 +86,39 @@ class ProxOpSARAPos(ProxOp):
         if self._dirac:
             self._wl_dict.remove("dirac")
 
-        self._dec_args = []
-        self._rec_args = []
+        self._dec_fns = []
+        self._rec_fns = []
+        self._wavelets = []
+        
+        # Dummy data required for tracing
+        dummy_x = torch.zeros(1, 1, *img_size, device=device, dtype=dtype)
+        
         for b in self._wl_dict:
-            self._dec_args.append(prepare_wavedec2_new(b, img_size, device, dtype, level=dec_lev))
-            self._rec_args.append(prepare_waverec2_new(b, img_size, device, dtype, level=dec_lev))
+            # Create wavelet tensor tuple
+            wt = ptwt.WaveletTensorTuple.from_wavelet(pywt.Wavelet(b), dtype=dtype)
+            wt = ptwt.WaveletTensorTuple(*(
+                t.to(device) if isinstance(t, torch.Tensor) else t for t in wt
+            ))
+            self._wavelets.append(wt)
+            
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                # Trace the decomposition
+                jit_dec = torch.jit.trace(
+                    _traceable_wavedec2, 
+                    (dummy_x, wt, self._dec_lev), 
+                    strict=False
+                )
+                self._dec_fns.append(jit_dec)
+                
+                # Trace the reconstruction
+                dummy_coeffs = jit_dec(dummy_x, wt, self._dec_lev)
+                jit_rec = torch.jit.trace(
+                    _traceable_waverec2, 
+                    (dummy_coeffs, wt), 
+                    strict=False
+                )
+                self._rec_fns.append(jit_rec)
 
         # Buffers for CUDA Graph capture
         self._x_buf   = torch.zeros(1, 1, *img_size, device=device, dtype=dtype)
@@ -128,10 +169,9 @@ class ProxOpSARAPos(ProxOp):
         Wavelet decomposition across all bases.
         """
         scaled = x / self._scale_factor
-        coeff: WaveletDictCoeff = [
-            wavedec2_new(scaled, w_dec_width, w_dec_height, fwd_schedule)
-            for w_dec_width, w_dec_height, fwd_schedule in self._dec_args
-        ]
+        coeff: WaveletDictCoeff = []
+        for i, fn in enumerate(self._dec_fns):
+            coeff.append(fn(scaled, self._wavelets[i], self._dec_lev))
         if self._dirac:
             coeff.append(scaled.clone())
         return coeff
@@ -141,8 +181,8 @@ class ProxOpSARAPos(ProxOp):
         Wavelet reconstruction across all bases
         """
         self._recon.zero_()
-        for (w_rec_height, w_rec_width, crop_schedule), y_i in zip(self._rec_args, y):
-            self._recon.add_(waverec2_new(y_i, w_rec_height, w_rec_width, crop_schedule) / self._scale_factor)
+        for i, fn in enumerate(self._rec_fns):
+            self._recon.add_(fn(y[i], self._wavelets[i]) / self._scale_factor)
         if self._dirac:
             self._recon.add_(y[-1] / self._scale_factor)
 
@@ -255,11 +295,14 @@ class ProxOpSARAPos(ProxOp):
         else:
             x = x.to(self._dtype).to(self._device)
             scaled = x / self._scale_factor
-            for w_dec_width, w_dec_height, fwd_schedule in self._dec_args:
-                curr_coeff = wavedec2_new(scaled, w_dec_width, w_dec_height, fwd_schedule)
-                for c in curr_coeff:
-                    w = self._wl_noise_floor / (self._wl_noise_floor + torch.abs(c))
-                    flat_weight_views.append(w.flatten())
+            for i, fn in enumerate(self._dec_fns):
+                curr_coeff = fn(scaled, self._wavelets[i], self._dec_lev)
+                
+                w_approx = self._wl_noise_floor / (self._wl_noise_floor + torch.abs(curr_coeff[0]))
+                flat_weight_views.append(w_approx.flatten())
+                for lev in range(1, self._dec_lev + 1):
+                    w_det = self._wl_noise_floor / (self._wl_noise_floor + torch.abs(curr_coeff[lev]))
+                    flat_weight_views.append(w_det.flatten())
                     
             if self._dirac:
                 w_dirac = self._wl_noise_floor / (self._wl_noise_floor + torch.abs(scaled))

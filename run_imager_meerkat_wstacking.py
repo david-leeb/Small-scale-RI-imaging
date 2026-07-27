@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 import argparse
 import json
 
-from src.imager_meerkat_wstacking import imager
+from src.imager_meerkat_wstacking_original import imager
 from src.utils import set_imaging_params_ri
 
 

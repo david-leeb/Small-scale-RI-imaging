@@ -4,19 +4,14 @@ def assign_channels_striped(num_chs: int, n_dev: int) -> list[list[int]]:
     return [list(range(i, num_chs, n_dev)) for i in range(n_dev)]
 
 def send_to_devices(data, devices):
-    """
-    Split the fully-loaded, fully-weight-corrected CPU data across devices,
-    channel-aligned with how compute_w_stacks and the operator partition work.
-    Call this only after load_real_data_to_tensor + weighting_correction have
-    both run on the CPU dict.
-    """
+
     n_dev = len(devices)
     num_chs = data["nFreqs"]
     chan_offsets = data["chan_offsets"]
     channel_lists = assign_channels_striped(num_chs, n_dev)
     data["channel_lists"] = channel_lists
 
-    for key in ["u", "v", "w", "nW", "y", "nWimag"]:
+    for key in ["u", "v", "w", "nW", "y", "nWimag", "stack_idx"]:
         full = data[key]
         dev_list = []
         for i in range(n_dev):
@@ -33,7 +28,7 @@ def send_to_devices(data, devices):
 
     data["N_vis_dev"] = [t.numel() for t in data["y_dev"]]
     
-    for key in ["u","v","w","nW","y"]:
+    for key in ["u","v","w","y"]:
         del data[key]
     
     return data

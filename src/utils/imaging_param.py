@@ -388,6 +388,7 @@ def set_imaging_params_ri(
     elif param_optimiser["algorithm"] == "usara":
         file_prefix = (
             "uSARA_heuRegScale_" + str(param_optimiser["heu_reg_param_scale"]) + "_"  
+            + "chs" + "_" + str(param_general["nfreqs"]) + "_"
             + "N_ratio" + "_" + str(param_general["ROP_N_ratio"]) + "_"
             + "epsilon_n" + "_" + str(param_general["ROP_epsilon_n"]) + "_"
         )

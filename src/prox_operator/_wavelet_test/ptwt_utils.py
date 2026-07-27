@@ -12,10 +12,10 @@ from typing import Any, Literal, Optional, TypeAlias, Union, cast, overload
 import numpy as np
 import pywt
 import torch
-from more_itertools import grouper
+# from more_itertools import grouper
 from typing_extensions import ParamSpec, TypeVar
 
-from ptwt_constants import (
+from .ptwt_constants import (
     SUPPORTED_DTYPES,
     BoundaryMode,
     OrthogonalizeMethod,
@@ -799,9 +799,9 @@ def _deprecated_alias(
     return deco
 
 
-def _group_for_symmetric(padding: tuple[int, ...]) -> list[tuple[int, int]]:
-    """Repack the padding tuple for symmetric padding."""
-    return list(reversed(list(grouper(padding, 2))))  # type: ignore[arg-type]
+# def _group_for_symmetric(padding: tuple[int, ...]) -> list[tuple[int, int]]:
+#     """Repack the padding tuple for symmetric padding."""
+#     return list(reversed(list(grouper(padding, 2))))  # type: ignore[arg-type]
 
 
 def _get_padding_n(

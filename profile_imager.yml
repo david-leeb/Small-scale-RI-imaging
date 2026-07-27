@@ -38,7 +38,7 @@ spec:
             --output="logs_profiling/nsys_mrop_${RUN_TIME}" \
             --export=sqlite \
             --force-overwrite=true \
-            python run_imager_meerkat_wstacking.py -c "config/meerkat_central_10chs_2048_profile.json" >> "$LOG_FILE" 2>&1
+            python run_imager_combined.py -c "config/meerkat_debug.json" >> "$LOG_FILE" 2>&1
         resources:
           requests:
             cpu: 64

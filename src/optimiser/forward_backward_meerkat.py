@@ -82,7 +82,7 @@ class ForwardBackward(Optimiser):
         self._meas_bp = self._meas_op_precise.adjoint_op(self._meas, nW, nWimag)
         if type(self._meas_bp) not in [list, tuple]:
             self._meas_bp = self._meas_bp.to(self._meas_op_precise.get_device())
-        self._psf = self._meas_op_precise.get_psf()
+        self._psf = self._meas_op_precise.get_psf(nW, nWimag)
         self._psf_peak = self._psf.max().item()
         print(f"PSF peak value: {self._psf_peak:.6e}")
 

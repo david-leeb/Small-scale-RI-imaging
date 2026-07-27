@@ -17,7 +17,7 @@ from ..ri_measurement_operator.pysrc.measOperator.meas_op_PSF import (
 )
 
 
-class FBSARA(ForwardBackward):
+class FBSARAMEERKAT(ForwardBackward):
     """
     FBSARA implements uSARA algorithm based on forward-backward algorithm.
 
@@ -32,6 +32,8 @@ class FBSARA(ForwardBackward):
         prox_op: ProxOpSARAPos,
         nW: torch.Tensor = None,
         nWimag: torch.Tensor = None,
+        heu_corr_factor: float = None,
+        meas_op_norm: float = None,
         use_ROP: bool = False,
         meas_op_approx: Union[MeasOpPSF, None] = None,
         im_min_itr: int = 30,
@@ -70,7 +72,7 @@ class FBSARA(ForwardBackward):
             Defaults to True.
             verbose (bool, optional): Whether to print verbose logs. Defaults to True.
         """
-        super(FBSARA, self).__init__(
+        super(FBSARAMEERKAT, self).__init__(
             meas,
             meas_op if meas_op_approx is None else meas_op_approx,
             meas_op,
@@ -95,6 +97,8 @@ class FBSARA(ForwardBackward):
         self._new_heu = new_heu
 
         self._heuristic = 1.0
+        self._meas_op_norm = meas_op_norm
+        self._heu_corr_factor = heu_corr_factor
         self._model_prev_re = self._model
         self._iter_inner = 0
         self._iter_outer = 0
@@ -114,14 +118,25 @@ class FBSARA(ForwardBackward):
         # step size
         self._gd_step_size = 1.98 / self._meas_op_precise.get_op_norm(self._nW, self._nWimag)
 
+        print("HEU CORR FACTOR:", self._heu_corr_factor)
+        print("MEAS OP NORM:", self._meas_op_norm)
+        
         # heuristic noise level
         # self._heuristic = 1 / np.sqrt(2 * self._meas_op_precise.get_op_norm())
-        if self._new_heu:
-            noise = (torch.randn_like(self._meas, dtype=self._meas.dtype, device=self._meas.device) + 1j * torch.randn_like(self._meas, dtype=self._meas.dtype, device=self._meas.device)) / np.sqrt(2)
-            self._heuristic = (self._meas_op.adjoint_op(noise, self._nW, self._nWimag) / self._meas_op.get_psf().max()).std().item() / self._meas_bp.max().item()
+        # if self._new_heu:
+        #     noise = (torch.randn_like(self._meas, dtype=self._meas.dtype, device=self._meas.device) + 1j * torch.randn_like(self._meas, dtype=self._meas.dtype, device=self._meas.device)) / np.sqrt(2)
+        #     self._heuristic = (self._meas_op.adjoint_op(noise, self._nW, self._nWimag) / self._meas_op.get_psf().max()).std().item() / self._meas_bp.max().item()
+        #     if self._verbose:
+        #         print(
+        #             f"INFO: using Sally's new heuristic",
+        #             flush=True,
+        #         )
+        # else:
+        if self._meas_op_norm is not None:
+            self._heuristic = 1 / np.sqrt(2 * self._meas_op_norm)
             if self._verbose:
                 print(
-                    f"INFO: using Sally's new heuristic",
+                    f"INFO: measurement operator norm {self._meas_op_norm}",
                     flush=True,
                 )
         else:
@@ -137,11 +152,13 @@ class FBSARA(ForwardBackward):
             #     flush=True,
             # )
             print(f"INFO: heuristic noise level: {self._heuristic}", flush=True)
-        if not self._use_ROP:
+        if not self._use_ROP and self._heu_corr_factor is None:
             heu_corr_factor = np.sqrt(
                 self._meas_op_precise.get_op_norm_prime(self._nW, self._nWimag)
                 / self._meas_op_precise.get_op_norm(self._nW, self._nWimag)
             )
+        elif self._heu_corr_factor is not None:
+            heu_corr_factor = self._heu_corr_factor
         else:
             heu_corr_factor = 1.0
         if not np.isclose(heu_corr_factor, 1.0) and not self._use_ROP:
