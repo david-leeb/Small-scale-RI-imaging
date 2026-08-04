@@ -32,6 +32,8 @@ class FBSARA(ForwardBackward):
         prox_op: ProxOpSARAPos,
         use_ROP: bool = False,
         meas_op_approx: Union[MeasOpPSF, None] = None,
+        meas_op_classical: MeasOpNUFFT | None = None,
+        y_uncompressed: torch.Tensor = None,
         im_min_itr: int = 30,
         im_max_itr: int = 2000,
         im_var_tol: float = 1e-5,
@@ -99,6 +101,9 @@ class FBSARA(ForwardBackward):
         self._im_rel_var = 1.0
         self._im_rel_var_outer = 1.0
         
+        self._meas_op_classical = meas_op_classical
+        self._y_uncompressed = y_uncompressed
+        
     def initialisation(self) -> None:
         """
         Initialises specific parameters of uSARA.
@@ -133,6 +138,7 @@ class FBSARA(ForwardBackward):
             #     flush=True,
             # )
             print(f"INFO: heuristic noise level: {self._heuristic}", flush=True)
+            
         if not self._use_ROP:
             heu_corr_factor = np.sqrt(
                 self._meas_op_precise.get_op_norm_prime()
@@ -140,6 +146,7 @@ class FBSARA(ForwardBackward):
             )
         else:
             heu_corr_factor = 1.0
+            
         if not np.isclose(heu_corr_factor, 1.0) and not self._use_ROP:
             self._heuristic *= heu_corr_factor
             if self._verbose:
@@ -148,12 +155,14 @@ class FBSARA(ForwardBackward):
                     f"corection factor {heu_corr_factor}",
                     flush=True,
                 )
+                
         # set noise floor level in wavelet domain
         self._prox_op.set_noise_floor_level(self._heuristic / 3.0)  # 9 wavelet bases
         if self._verbose:
             print(
                 f"INFO: estimated noise floor level in wavelet coeeficients: {self._heuristic/3.0}"
             )
+            
         if not np.isclose(self._heu_reg_scale, 1.0):
             self._heuristic *= self._heu_reg_scale
             if self._verbose:
@@ -162,6 +171,7 @@ class FBSARA(ForwardBackward):
                     f"scaling factor {self._heu_reg_scale}",
                     flush=True,
                 )
+                
         # set soft thresholding value
         self._prox_op.set_soft_thresholding_value(
             self._heuristic / 3.0
@@ -372,3 +382,20 @@ class FBSARA(ForwardBackward):
             self.get_residual_image() / self._psf_peak,
             overwrite=True,
         )
+        
+        # If using ROP, save the residual using the classical measurement operator applied to the ROP output
+        if self._use_ROP:
+            x_out = torch.from_numpy(self.get_model_image()).to(device=self._meas_op_classical.get_device(), dtype=self._meas_op_classical._dtype)
+            y_uncompressed = self._y_uncompressed.to(device=self._meas_op_classical.get_device(), dtype=self._meas_op_classical._dtype_meas)
+            dirty = self._meas_op_classical.adjoint_op(y_uncompressed)
+            model_bp = self._meas_op_classical.adjoint_op(self._meas_op_classical.forward_op(x_out))
+            residual = (dirty - model_bp).squeeze().cpu().to(torch.double).numpy()
+            
+            fits.writeto(
+                os.path.join(
+                    self._save_pth,
+                    self._file_prefix + "residual_dirty_image_ROP.fits",
+                ),
+                residual,
+                overwrite=True,
+            )

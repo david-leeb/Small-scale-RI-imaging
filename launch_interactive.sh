@@ -20,8 +20,8 @@ while true; do
     if [ -n "$POD" ]; then
         break
     fi
-    echo "  Pod not ready yet, retrying in 3s..."
-    sleep 3
+    echo "  Pod not ready yet, retrying in 10s..."
+    sleep 10
 done
 
 echo "Pod found: $POD"

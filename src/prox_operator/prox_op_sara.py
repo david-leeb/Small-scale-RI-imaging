@@ -7,7 +7,7 @@ import pywt
 import warnings
 
 from .prox_op import ProxOp
-from ._wavelet_test.wavelets_custom import (
+from .wavelets_custom import (
     prepare_wavedec2_new,
     prepare_waverec2_new,
     wavedec2_new,

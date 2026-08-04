@@ -116,7 +116,6 @@ def load_dataset(
     w_cat = np.concatenate([r["w"] for r in channel_results])
     nW_cat = np.concatenate([r["nW"] for r in channel_results])
     y_cat = np.concatenate([r["data"] for r in channel_results])
-    
     B_per_ch = int(max(r["batches"].max() for r in channel_results if r["batches"].size) + 1)
     batches_cat = np.concatenate([r["batches"] + B_per_ch * i for i, r in enumerate(channel_results)])
     ant1_cat = np.concatenate([r["ant1"] for r in channel_results])
@@ -138,11 +137,18 @@ def load_dataset(
     if image_pixel_size is not None:
         print(f"INFO: user specified pixelsize: {image_pixel_size:.4e} arcsec.", flush=True)
     else:
-        image_pixel_size = (180.0 / np.pi) * 3600.0 / (super_resolution * spatial_bandwidth)
-        print(
-            f"INFO: default pixelsize: {image_pixel_size:.4e} arcsec, that is {super_resolution:.4f} x nominal resolution.",
-            flush=True,
-        )
+        if "nominal_pixelsize" in data:
+            image_pixel_size = data["nominal_pixelsize"].item() / super_resolution
+            print(
+                f"INFO: user-specified pixel size: {image_pixel_size:.4e} arcsec (i.e. super resolution factor: {super_resolution:.4f})",
+                flush=True,
+            )
+        else:
+            image_pixel_size = (180.0 / np.pi) * 3600.0 / (super_resolution * spatial_bandwidth)
+            print(
+                f"INFO: default pixelsize: {image_pixel_size:.4e} arcsec, that is {super_resolution:.4f} x nominal resolution.",
+                flush=True,
+            )
 
     data_dict["image_pixel_size"] = image_pixel_size
     super_resolution = (180.0 / np.pi) * 3600.0 / (image_pixel_size * spatial_bandwidth)

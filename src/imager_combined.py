@@ -99,10 +99,6 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         print(f"INFO: Original dimensions: N = {N}, Q = {Q}, K = {K}, B = {B}, N_ratio = {param_measop["ROP_param"]["N_ratio"]}.")
         epsilon, P_Q, M_B, M_K = solve_epsilon_same_aa(N, param_measop["ROP_param"]["Q"], B, K, N_ratio=param_measop["ROP_param"]["N_ratio"], n=param_measop["ROP_param"]["epsilon_n"], verbose=True)
         print(f"INFO: Calculated epsilon for MROP modulation dimensions: {epsilon:.4f} (epsilon = (N / Q^2VK)^(1/4)).")
-        #! DEBUG
-        # M_K = 50
-        # M_B = 721
-        # P_Q = 32
         
         param_measop["ROP_param"]["M_K"] = M_K
         param_measop["ROP_param"]["M_B"] = M_B
@@ -110,6 +106,8 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         param_measop["ROP_param"]["M"] = M_K * M_B
         print(f"INFO: MROP set with P = {param_measop["ROP_param"]["P"]}, M_K = {param_measop["ROP_param"]["M_K"]}, M_B = {param_measop["ROP_param"]["M_B"]}, M = {param_measop["ROP_param"]["M"]}.")
         print(f"INFO: PM / N = {param_measop["ROP_param"]["P"] * param_measop["ROP_param"]["M"] / N:.4f}", flush=True)
+        
+        param_optimiser["file_prefix"] = param_optimiser["file_prefix"] + "P_" + str(P_Q) + "_MB_" + str(M_B) + "_MK_" + str(M_K) + "_"
         
         from .mrop_ri_measurement_operator import weighting_correction
         data, weight_corr = weighting_correction(data, param_measop["ROP_param"], rapha=True)
@@ -127,6 +125,7 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
     gc.collect()
     
     param_measop["w_stacking"] = True
+    param_measop["reduce_memory_usage"] = False
     if param_measop["w_stacking"]:
         w_stack_data_list = compute_w_stacks(data, param_measop, devices)
     else:
@@ -155,8 +154,28 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         real_flag=True,
     )
     
+    # Initialise classical measurement operator for ROP to save the correct residual image
+    if param_measop["use_ROP"]:
+        meas_op_classical = nufft_op(
+                img_size=param_measop["img_size"],
+                w_stack_data=w_stack_data_list,
+                num_chs=data["nFreqs"],
+                use_ROP=False,
+                devices=devices,
+                ROP_param=None,
+                ant1=data["ant1"],
+                ant2=data["ant2"],
+                batches=data["batches"],
+                natural_weight_dev=data["nW_dev"],
+                image_weight_dev=data["nWimag_dev"],
+                device=devices[0],
+                dtype=param_measop["dtype"],
+                real_flag=True,
+            )
+        y_uncompressed = meas_op_classical.prepare_or_compress_data(data["y_dev"])
+    
     data["y"] = meas_op.prepare_or_compress_data(data["y_dev"])
-    # data["y"] = meas_op.prepare_or_compress_data(data["y_dev"], weight=weight_corr)
+    # data["y"] = meas_op.prepare_or_compress_data(data["y_dev"], weight=weight_corr) #! results in ~factor of 10 smaller heuristic scales for same result
     
     del data["u_dev"], data["v_dev"], data["w_dev"], data["nW_dev"], data["nWimag_dev"], data["y_dev"]
     gc.collect()
@@ -286,6 +305,8 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
             meas_op,
             prox_op_sara,
             use_ROP=param_measop["use_ROP"],
+            meas_op_classical=meas_op_classical if param_measop["use_ROP"] else None,
+            y_uncompressed=y_uncompressed if param_measop["use_ROP"] else None,
             meas_op_approx=meas_op_approx,
             im_min_itr=param_optimiser["im_min_itr"],
             im_max_itr=param_optimiser["im_max_itr"],

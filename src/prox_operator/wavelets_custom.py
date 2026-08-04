@@ -9,26 +9,18 @@ import torch.nn.functional as F
 torch.backends.cudnn.allow_tf32 = False
 torch.backends.cuda.matmul.allow_tf32 = False
 
-from .ptwt_utils import (
-    _adjust_padding_at_reconstruction,
-    _get_filter_tensors,
-)
-from .ptwt_constants import Wavelet
+from ptwt._util import _adjust_padding_at_reconstruction, _get_filter_tensors, _get_pad
+from ptwt.constants import Wavelet
 
 Schedule = List[Tuple[int, int, int, int]]  # (padl, padr, padt, padb) per level
-
-def _get_pad(data_len: int, filt_len: int) -> Tuple[int, int]:
-    padl = padr = (2 * filt_len - 3) // 2
-    padr += data_len % 2
-    return padl, padr
 
 def _build_schedules(img_size: Tuple[int, int], filt_len: int, level: int) -> Tuple[Schedule, Schedule]:
     h, w = img_size
     shapes = [(h, w)]
     fwd_schedule: Schedule = []
     for _ in range(level):
-        padl, padr = _get_pad(w, filt_len)
-        padt, padb = _get_pad(h, filt_len)
+        padr, padl = _get_pad(w, filt_len)
+        padb, padt = _get_pad(h, filt_len)
         fwd_schedule.append((padl, padr, padt, padb))
         h = (h + padt + padb - filt_len) // 2 + 1
         w = (w + padl + padr - filt_len) // 2 + 1

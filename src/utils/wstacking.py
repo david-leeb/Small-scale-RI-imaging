@@ -53,7 +53,9 @@ def process_device_global(d, dev, data, param_measop, fov_radians, num_wstacks, 
         for i in range(num_wstacks)
     ]
     
-    plan_pair = SharedNUFFTPlanPair(param_measop["img_size"], param_measop["dtype"], dev)
+    plan_pair = None
+    if param_measop["reduce_memory_usage"]:
+        plan_pair = SharedNUFFTPlanPair(param_measop["img_size"], param_measop["dtype"], dev)
 
     meas_op = [None] * num_wstacks
     for i in range(num_wstacks):
@@ -117,8 +119,6 @@ def compute_global_w_stacking(data, param_measop):
     kmeans.fit(w_kmeans)
     centers = np.sort(kmeans.cluster_centers_, axis=0).ravel()
     
-    #! CHECK THIS
-    # labels = kmeans.predict(w)
     w_flat = w.ravel()
     idx_right = np.clip(np.searchsorted(centers, w_flat), 0, len(centers) - 1)
     idx_left = np.clip(idx_right - 1, 0, len(centers) - 1)
@@ -140,7 +140,7 @@ def compute_w_stacks(data, param_measop, devices):
     w_stack_data_list = [
         process_device_global(
             d, dev, data, param_measop,
-            data["fov_radians"], data["num_wstacks"], data["w_center"],
+            data["fov_radians"], data["num_wstacks"], data["w_center"]
         )
         for d, dev in enumerate(devices)
     ]
