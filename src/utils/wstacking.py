@@ -47,21 +47,27 @@ def process_device_global(d, dev, data, param_measop, fov_radians, num_wstacks, 
     # create w-stacking correction term
     n_term = get_n_term(param_measop["img_size"], fov_radians, dev, param_measop["dtype"])
 
-    # Precompute per-stack w-corrections
-    w_stack_correct = [
-        torch.exp(-2j * torch.pi * w_center[i] * (n_term - 1)) / n_term
-        for i in range(num_wstacks)
-    ]
+    # Precompute per-stack w-corrections if w-stacking is needed
+    complex_dtype = torch.complex128 if param_measop["dtype"] == torch.float64 else torch.complex64
+    if num_wstacks == 1:
+        w_stack_correct = [torch.ones(1, 1, *param_measop["img_size"], dtype=complex_dtype, device=dev)]
+    else:
+        w_stack_correct = [
+            torch.exp(-2j * torch.pi * w_center[i] * (n_term - 1)) / n_term
+            for i in range(num_wstacks)
+        ]
     
     plan_pair = None
-    if param_measop["reduce_memory_usage"]:
+    if param_measop["reduce_memory_usage"] and num_wstacks > 1:
         plan_pair = SharedNUFFTPlanPair(param_measop["img_size"], param_measop["dtype"], dev)
 
     meas_op = [None] * num_wstacks
     for i in range(num_wstacks):
+        u_stack = data_i["u"] if num_wstacks == 1 else data_i["u"][:, :, w_stack_idx == i]
+        v_stack = data_i["v"] if num_wstacks == 1 else data_i["v"][:, :, w_stack_idx == i]
         meas_op[i] = MeasOpPytorchFinufft(
-            u=data_i["u"][:, :, w_stack_idx == i],
-            v=data_i["v"][:, :, w_stack_idx == i],
+            u=u_stack,
+            v=v_stack,
             img_size=param_measop["img_size"],
             real_flag=True,
             dtype=param_measop["dtype"],
@@ -86,12 +92,21 @@ def compute_global_w_stacking(data, param_measop):
         (data["image_pixel_size"] / 3600) * param_measop["img_size"][0] * np.pi / 180,
         (data["image_pixel_size"] / 3600) * param_measop["img_size"][1] * np.pi / 180,
     )
+    data["fov_radians"] = fov_radians
     
     w = data["w"].numpy(force=True).reshape(-1, 1)
     
     num_wstacks = int(np.ceil(
         w.max() * 2 * np.pi * (1 - np.sqrt(1 - 2 * np.sin(fov_radians[0] / 2) ** 2)))
     )
+    data["num_wstacks"] = num_wstacks
+    
+    if num_wstacks == 1:
+        print(f"INFO: Number of w-stacks determined to be 1. Skipping w-stacking.")
+        n_vis = data["u"].shape[-1]
+        data["w_center"] = torch.zeros(1, dtype=param_measop["dtype"], device=torch.device("cpu"))
+        data["stack_idx"] = torch.zeros((1, 1, n_vis), dtype=torch.int32, device=torch.device("cpu"))
+        return data
     
     print(f"INFO: FOV in radians: {fov_radians}, max w value: {w.max():.4f}, number of w-stacks determined to be {num_wstacks} based on the FOV and max w value.", flush=True)
     
@@ -132,8 +147,7 @@ def compute_global_w_stacking(data, param_measop):
     
     data["w_center"] = torch.tensor(centers, dtype=param_measop["dtype"], device=torch.device("cpu")).view(-1)
     data["stack_idx"] = torch.as_tensor(labels, dtype=torch.int32, device=torch.device("cpu")).view(1, 1, -1)
-    data["num_wstacks"] = num_wstacks
-    data["fov_radians"] = fov_radians
+    
     return data
 
 def compute_w_stacks(data, param_measop, devices):
@@ -144,37 +158,4 @@ def compute_w_stacks(data, param_measop, devices):
         )
         for d, dev in enumerate(devices)
     ]
-    return w_stack_data_list
-
-def compute_single_stack(data, param_measop, devices):
-    """
-    Build the same w_stack_data structure as compute_w_stacks, but as one trivial
-    "stack" per device covering ALL of that device's baselines — for datasets with
-    no w coordinate (or where w-correction/w-stacking isn't required). No k-means,
-    no w-plane clustering; each device gets exactly one NUFFT plan and an identity
-    correction term.
-    """
-    complex_dtype = torch.complex128 if param_measop["dtype"] == torch.float64 else torch.complex64
-
-    w_stack_data_list = []
-    for d, dev in enumerate(devices):
-        u_i = data["u_dev"][d]
-        v_i = data["v_dev"][d]
-        n_vis_i = u_i.shape[-1]
-
-        meas_op = MeasOpPytorchFinufft(
-            u=u_i, v=v_i, img_size=param_measop["img_size"],
-            real_flag=True, dtype=param_measop["dtype"], device=dev,
-        )
-
-        identity_correction = torch.ones(1, 1, *param_measop["img_size"], dtype=complex_dtype, device=dev)
-        stack_idx = torch.zeros(n_vis_i, dtype=torch.int32, device=dev)  # every baseline in "stack 0"
-
-        w_stack_data_list.append({
-            "w_center": torch.zeros(1, device=dev),
-            "corrections": [identity_correction],
-            "stack_idx": stack_idx,
-            "meas_op": [meas_op],
-        })
-
     return w_stack_data_list

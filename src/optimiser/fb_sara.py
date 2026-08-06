@@ -399,3 +399,14 @@ class FBSARA(ForwardBackward):
                 residual,
                 overwrite=True,
             )
+            
+            # Save normalised residual
+            psf_peak_classical = self._meas_op_classical.get_psf().max().item()
+            fits.writeto(
+                os.path.join(
+                    self._save_pth,
+                    self._file_prefix + "normalised_residual_dirty_image_ROP.fits",
+                ),
+                residual / psf_peak_classical,
+                overwrite=True,
+            )

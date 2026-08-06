@@ -67,6 +67,11 @@ def set_imaging_params_ri(
         param_measop["dm_shift"] = int(param_general["dm_shift"])
     else:
         param_measop["dm_shift"] = 0
+    
+    if param_general.get("vis_remove", None):
+        param_measop["vis_remove"] = param_general["vis_remove"]
+    else:
+        param_measop["vis_remove"] = 0
         
     param_measop["nfreqs"] = param_general.get("nfreqs", None)
     param_measop["freq_num"] = param_general.get("freq_num", None)
@@ -386,13 +391,9 @@ def set_imaging_params_ri(
     elif param_optimiser["algorithm"] == "cairi":
         file_prefix = "cAIRI_heuScale_" + str(param_optimiser["heu_noise_scale"]) + "_"
     elif param_optimiser["algorithm"] == "usara":
-        prefix = "mrop" if param_measop["use_ROP"] else "classical"
         file_prefix = (
-            prefix + "_"
-            + "uSARA_heuRegScale_" + str(param_optimiser["heu_reg_param_scale"]) + "_"  
+            "uSARA_heuRegScale_" + str(param_optimiser["heu_reg_param_scale"]) + "_"  
             + "chs" + "_" + str(param_general["nfreqs"]) + "_"
-            + "N_ratio" + "_" + str(param_general["ROP_N_ratio"]) + "_"
-            + "epsilon_n" + "_" + str(param_general["ROP_epsilon_n"]) + "_"
         )
     if param_general.get("run_id", None):
         file_prefix += "runID_" + str(param_general["run_id"]) + "_"

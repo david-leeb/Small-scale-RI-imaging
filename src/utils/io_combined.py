@@ -137,18 +137,11 @@ def load_dataset(
     if image_pixel_size is not None:
         print(f"INFO: user specified pixelsize: {image_pixel_size:.4e} arcsec.", flush=True)
     else:
-        if "nominal_pixelsize" in data:
-            image_pixel_size = data["nominal_pixelsize"].item() / super_resolution
-            print(
-                f"INFO: user-specified pixel size: {image_pixel_size:.4e} arcsec (i.e. super resolution factor: {super_resolution:.4f})",
-                flush=True,
-            )
-        else:
-            image_pixel_size = (180.0 / np.pi) * 3600.0 / (super_resolution * spatial_bandwidth)
-            print(
-                f"INFO: default pixelsize: {image_pixel_size:.4e} arcsec, that is {super_resolution:.4f} x nominal resolution.",
-                flush=True,
-            )
+        image_pixel_size = (180.0 / np.pi) * 3600.0 / (super_resolution * spatial_bandwidth)
+        print(
+            f"INFO: default pixelsize: {image_pixel_size:.4e} arcsec, that is {super_resolution:.4f} x nominal resolution.",
+            flush=True,
+        )
 
     data_dict["image_pixel_size"] = image_pixel_size
     super_resolution = (180.0 / np.pi) * 3600.0 / (image_pixel_size * spatial_bandwidth)

@@ -21,7 +21,7 @@ spec:
       - name: python-worker
         stdin: true
         tty: true
-        image: davidleeb24/mrop:v4
+        image: davidleeb24/mrop:v5
         imagePullPolicy: Always
         args: ["/bin/bash"]
         resources:
