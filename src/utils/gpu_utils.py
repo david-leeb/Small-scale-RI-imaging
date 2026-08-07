@@ -28,7 +28,7 @@ def send_to_devices(data, devices):
 
     data["N_vis_dev"] = [t.numel() for t in data["y_dev"]]
     
-    for key in ["u","v","w","y"]:
+    for key in ["u","v","w", "y"]:
         del data[key]
     
     return data

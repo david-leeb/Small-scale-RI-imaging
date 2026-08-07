@@ -40,6 +40,8 @@ def process_device_global(d, dev, data, param_measop, fov_radians, num_wstacks, 
     data_i = {
         "u": data["u_dev"][d],
         "v": data["v_dev"][d],
+        "nW": data["nW_dev"][d],
+        "nWimag": data["nWimag_dev"][d]
     }
     w_stack_idx = data["stack_idx_dev"][d].to(dev).view(-1)
     w_center = w_center.to(dev)
@@ -58,16 +60,20 @@ def process_device_global(d, dev, data, param_measop, fov_radians, num_wstacks, 
         ]
     
     plan_pair = None
-    if param_measop["reduce_memory_usage"] and num_wstacks > 1:
+    if param_measop["meas_reduce_memory_usage"] and num_wstacks > 1:
         plan_pair = SharedNUFFTPlanPair(param_measop["img_size"], param_measop["dtype"], dev)
 
     meas_op = [None] * num_wstacks
     for i in range(num_wstacks):
         u_stack = data_i["u"] if num_wstacks == 1 else data_i["u"][:, :, w_stack_idx == i]
         v_stack = data_i["v"] if num_wstacks == 1 else data_i["v"][:, :, w_stack_idx == i]
+        nW_stack = data_i["nW"] if num_wstacks == 1 else data_i["nW"][:, :, w_stack_idx == i]
+        nWimag_stack = data_i["nWimag"] if num_wstacks == 1 else data_i["nWimag"][:, :, w_stack_idx == i]
         meas_op[i] = MeasOpPytorchFinufft(
             u=u_stack,
             v=v_stack,
+            natural_weight=nW_stack,
+            image_weight=nWimag_stack,
             img_size=param_measop["img_size"],
             real_flag=True,
             dtype=param_measop["dtype"],

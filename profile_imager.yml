@@ -36,9 +36,8 @@ spec:
             --trace=cuda,nvtx \
             --cuda-memory-usage=true \
             --output="logs_profiling/nsys_mrop_${RUN_TIME}" \
-            --export=sqlite \
             --force-overwrite=true \
-            python run_imager_combined.py -c "config/meerkat_debug.json" >> "$LOG_FILE" 2>&1
+            python run_imager_combined.py -c "config/meerkat_debug_2.json" >> "$LOG_FILE" 2>&1
         resources:
           requests:
             cpu: 64

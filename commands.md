@@ -6,7 +6,7 @@ kubectl get pods
 kubectl get deployments
 
 ## Access pod
-kubectl exec --stdin --tty mrop-interactive-job-7qgsz-dfkq2 -- /bin/bash 
+kubectl exec --stdin --tty mrop-interactive-job-t44pl-8sjs4 -- /bin/bash 
 cd /mnt/pvc/diss/Small-scale-RI-imaging-mrop
 
 ## Delete pods

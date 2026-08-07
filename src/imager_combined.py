@@ -53,6 +53,7 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
     devices = None
     if device == torch.device("cuda"):
         devices = [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
+        # devices = [torch.device("cuda:0")]
         print("INFO: Detected", len(devices), "GPUs")
         
     # Handle case where number of channels < number of devices
@@ -80,12 +81,11 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
     )
     
     # Add reconstruction method to file prefix
-    param_optimiser["file_prefix"] = (str(param_measop["ROP_param"]["ROP_type"]) if param_measop["use_ROP"] else "classical") + "_" + param_optimiser["file_prefix"]
+    use_ROP = param_measop["use_ROP"]
+    param_optimiser["file_prefix"] = (str(param_measop["ROP_param"]["ROP_type"]) if use_ROP else "classical") + "_" + param_optimiser["file_prefix"]
     
     # Default to no weight correction, only applied for ROP and if flag is set
-    weight_corr_natural = 1
-    weight_corr_uniform = 1
-    if param_measop["use_ROP"]:
+    if use_ROP:
         if param_measop["ROP_param"]["Q"] is None:
             assert "Q" in data, "number of anntennas Q is not in data and not provided"
             param_measop["ROP_param"]["Q"] = int(data["Q"])
@@ -113,7 +113,7 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         param_measop["ROP_param"]["P"] = P_Q 
         param_measop["ROP_param"]["M"] = M_K * M_B
         print(f"INFO: MROP set with P = {param_measop["ROP_param"]["P"]}, M_K = {param_measop["ROP_param"]["M_K"]}, M_B = {param_measop["ROP_param"]["M_B"]}, M = {param_measop["ROP_param"]["M"]}.")
-        print(f"INFO: PM / N = {param_measop["ROP_param"]["P"] * param_measop["ROP_param"]["M"] / N:.4f}", flush=True)
+        print(f"INFO: PM / N = {param_measop["ROP_param"]["P"] * param_measop["ROP_param"]["M"] / N:.4f}", flush=True) #! FIX THAT, WHICH P TO USE?
                 
         # Add ROP specific parameters to file prefix
         param_optimiser["file_prefix"] = param_optimiser["file_prefix"] + (
@@ -122,20 +122,10 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
             "_P_" + str(P_Q) + "_MB_" + str(M_B) + "_MK_" + str(M_K) + "_" 
         )
         
-        data, weight_corr_natural, weight_corr_uniform = weighting_correction(data, param_measop["ROP_param"], rapha=True)
-        # if param_measop["flag_data_weighting"]:
-        #     data, weight_corr_natural, weight_corr_uniform = weighting_correction(data, param_measop["ROP_param"], rapha=True)
-        # else:
-        #     print(f"INFO: No ROP weight correction applied")
+        data, weight_corr = weighting_correction(data, param_measop["ROP_param"], rapha=True)
 
         gc.collect()
         torch.cuda.empty_cache()
-        
-    print("WEIGHTING INFO")
-    print(f"nW: ", data["nW"])
-    print(f"nWimag: ", data["nWimag"])
-    print(f"weight corr natural: ", weight_corr_natural)
-    print(f"weight corr uniform: ", weight_corr_uniform)
     
     data["y"] = data["y"] * data["nW"] * data["nWimag"]
     
@@ -143,7 +133,6 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
     data = send_to_devices(data, devices)
     gc.collect()
     
-    param_measop["reduce_memory_usage"] = False
     w_stack_data_list = compute_w_stacks(data, param_measop, devices)
     mem("after w-stack + measop construction", devices)
     gc.collect()
@@ -156,47 +145,26 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         img_size=param_measop["img_size"],
         w_stack_data=w_stack_data_list,
         num_chs=data["nFreqs"],
-        use_ROP=param_measop["use_ROP"],
+        use_ROP=use_ROP,
         devices=devices,
-        ROP_param=param_measop["ROP_param"] if param_measop["use_ROP"] else None,
+        ROP_param=param_measop["ROP_param"] if use_ROP else None,
         ant1=data["ant1"],
         ant2=data["ant2"],
         batches=data["batches"],
-        natural_weight_dev=data["nW_dev"],
-        image_weight_dev=data["nWimag_dev"],
         device=devices[0],
         dtype=param_measop["dtype"],
         real_flag=True,
     )
     
-    # Initialise classical measurement operator for ROP to save the correct residual image
-    if param_measop["use_ROP"]:
-        # Revert weighting correction applied by ROP
-        uncorrected_nW_dev = [block / weight_corr_natural for block in data["nW_dev"]]
-        uncorrected_nWimag_dev = [block / weight_corr_uniform for block in data["nWimag_dev"]]
-        
-        meas_op_classical = nufft_op(
-                img_size=param_measop["img_size"],
-                w_stack_data=w_stack_data_list,
-                num_chs=data["nFreqs"],
-                use_ROP=False,
-                devices=devices,
-                ROP_param=None,
-                ant1=data["ant1"],
-                ant2=data["ant2"],
-                batches=data["batches"],
-                natural_weight_dev=uncorrected_nW_dev,
-                image_weight_dev=uncorrected_nWimag_dev,
-                device=devices[0],
-                dtype=param_measop["dtype"],
-                real_flag=True,
-            )
-        
-        inverse_weight_corr = 1 / (weight_corr_natural * weight_corr_uniform)
-        y_uncompressed = meas_op_classical.prepare_or_compress_data(data["y_dev"], weight=inverse_weight_corr) 
-    
-    data["y"] = meas_op.prepare_or_compress_data(data["y_dev"])
-    # data["y"] = meas_op.prepare_or_compress_data(data["y_dev"], weight=weight_corr_natural*weight_corr_uniform) #! results in ~factor of 10 smaller heuristic scales for same result
+    # Gather striped data on GPU 0 for Optimiser
+    parts = [
+        data["y_dev"][i].view(-1).to(device=devices[0], dtype=meas_op._dtype_meas)
+        for i in range(meas_op.n_dev)
+    ]
+    y = torch.cat(parts).view(1, 1, -1)
+    if use_ROP:
+        y_compressed, compression_ratio = meas_op.compress_data(data["y_dev"])
+        param_optimiser["file_prefix"] += f"cr_{compression_ratio:.2f}_"
     
     del data["u_dev"], data["v_dev"], data["w_dev"], data["nW_dev"], data["nWimag_dev"], data["y_dev"]
     gc.collect()
@@ -320,14 +288,14 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
         )
         gc.collect()
         torch.cuda.empty_cache()
-
+        
         optimiser = FBSARA(
-            data["y"],
+            y_compressed if use_ROP else y,
             meas_op,
             prox_op_sara,
-            use_ROP=param_measop["use_ROP"],
-            meas_op_classical=meas_op_classical if param_measop["use_ROP"] else None,
-            y_uncompressed=y_uncompressed if param_measop["use_ROP"] else None,
+            use_ROP=use_ROP,
+            y_uncompressed=y if use_ROP else None,
+            weight_correction=weight_corr if use_ROP else None,
             meas_op_approx=meas_op_approx,
             im_min_itr=param_optimiser["im_min_itr"],
             im_max_itr=param_optimiser["im_max_itr"],
@@ -355,10 +323,6 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict) -> Non
 
         # run imaging loop
         optimiser.run()
-        
-        residual_data = optimiser._meas - optimiser._meas_op_precise.forward_op(optimiser._model)
-        residual_power = torch.mean(torch.abs(residual_data) ** 2).item()
-        print(f"INFO: MROP-domain residual mean|.|^2 (target ~1.0): {residual_power:.6f}", flush=True)
 
         # finalisation
         optimiser.finalisation()

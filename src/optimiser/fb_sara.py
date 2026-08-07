@@ -32,8 +32,8 @@ class FBSARA(ForwardBackward):
         prox_op: ProxOpSARAPos,
         use_ROP: bool = False,
         meas_op_approx: Union[MeasOpPSF, None] = None,
-        meas_op_classical: MeasOpNUFFT | None = None,
         y_uncompressed: torch.Tensor = None,
+        weight_correction: torch.Tensor = None,
         im_min_itr: int = 30,
         im_max_itr: int = 2000,
         im_var_tol: float = 1e-5,
@@ -101,8 +101,8 @@ class FBSARA(ForwardBackward):
         self._im_rel_var = 1.0
         self._im_rel_var_outer = 1.0
         
-        self._meas_op_classical = meas_op_classical
         self._y_uncompressed = y_uncompressed
+        self._weight_correction = weight_correction
         
     def initialisation(self) -> None:
         """
@@ -385,10 +385,17 @@ class FBSARA(ForwardBackward):
         
         # If using ROP, save the residual using the classical measurement operator applied to the ROP output
         if self._use_ROP:
-            x_out = torch.from_numpy(self.get_model_image()).to(device=self._meas_op_classical.get_device(), dtype=self._meas_op_classical._dtype)
-            y_uncompressed = self._y_uncompressed.to(device=self._meas_op_classical.get_device(), dtype=self._meas_op_classical._dtype_meas)
-            dirty = self._meas_op_classical.adjoint_op(y_uncompressed)
-            model_bp = self._meas_op_classical.adjoint_op(self._meas_op_classical.forward_op(x_out))
+            self._meas_op.use_ROP = False
+            
+            # Undo ROP specific weight corrections
+            for sub_ops in self._meas_op._wstack_meas_ops_dev:
+                for sub_op in sub_ops:
+                    sub_op._data_weight /= self._weight_correction
+            self._y_uncompressed /= self._weight_correction
+            
+            x_out = torch.from_numpy(self.get_model_image()).to(device=self._meas_op.get_device(), dtype=self._meas_op._dtype)
+            dirty = self._meas_op.adjoint_op(self._y_uncompressed)
+            model_bp = self._meas_op.adjoint_op(self._meas_op.forward_op(x_out))
             residual = (dirty - model_bp).squeeze().cpu().to(torch.double).numpy()
             
             fits.writeto(
@@ -401,7 +408,12 @@ class FBSARA(ForwardBackward):
             )
             
             # Save normalised residual
-            psf_peak_classical = self._meas_op_classical.get_psf().max().item()
+            psf_peak_classical = self._meas_op.get_psf().max().item()
+            print(
+                "INFO: The std of the ROP normalised residual dirty image",
+                f"{np.std(residual/psf_peak_classical).item()}",
+                flush=True,
+            )
             fits.writeto(
                 os.path.join(
                     self._save_pth,
