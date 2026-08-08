@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import math
 from sklearn.cluster import KMeans
+from threadpoolctl import threadpool_limits
 
 from src.ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft, SharedNUFFTPlanPair
 
@@ -46,7 +47,7 @@ def process_device_global(d, dev, data, param_measop, fov_radians, num_wstacks, 
     w_stack_idx = data["stack_idx_dev"][d].to(dev).view(-1)
     w_center = w_center.to(dev)
     
-    # create w-stacking correction term
+    # Create w-stacking correction term
     n_term = get_n_term(param_measop["img_size"], fov_radians, dev, param_measop["dtype"])
 
     # Precompute per-stack w-corrections if w-stacking is needed
@@ -59,12 +60,23 @@ def process_device_global(d, dev, data, param_measop, fov_radians, num_wstacks, 
             for i in range(num_wstacks)
         ]
     
-    plan_pair = None
-    if param_measop["meas_reduce_memory_usage"] and num_wstacks > 1:
-        plan_pair = SharedNUFFTPlanPair(param_measop["img_size"], param_measop["dtype"], dev)
-
+    plan_pairs = None
+    group_size = param_measop["nufft_group_size"]
+    if group_size is None:
+        group_size = 1
+    if num_wstacks > 1 and group_size > 1:
+        n_groups = math.ceil(num_wstacks / group_size)
+        print(f"INFO: Created {n_groups} SharedNUFFTPlanPairs (grouping every {group_size} stacks).", flush=True)
+        plan_pairs = [
+            SharedNUFFTPlanPair(param_measop["img_size"], param_measop["dtype"], dev)
+            for _ in range(n_groups)
+        ]
+    else:
+        print("INFO: No plan sharing (group_size = 1). Each stack gets a dedicated plan.", flush=True)
+        
     meas_op = [None] * num_wstacks
     for i in range(num_wstacks):
+        plan_pair = plan_pairs[i // group_size] if plan_pairs is not None else None
         u_stack = data_i["u"] if num_wstacks == 1 else data_i["u"][:, :, w_stack_idx == i]
         v_stack = data_i["v"] if num_wstacks == 1 else data_i["v"][:, :, w_stack_idx == i]
         nW_stack = data_i["nW"] if num_wstacks == 1 else data_i["nW"][:, :, w_stack_idx == i]
@@ -137,7 +149,8 @@ def compute_global_w_stacking(data, param_measop):
         tol=1e-6,
     )
     
-    kmeans.fit(w_kmeans)
+    with threadpool_limits(limits=64):
+        kmeans.fit(w_kmeans)
     centers = np.sort(kmeans.cluster_centers_, axis=0).ravel()
     
     w_flat = w.ravel()

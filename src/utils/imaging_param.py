@@ -240,10 +240,10 @@ def set_imaging_params_ri(
             torch.device(list_devices[0]) if list_devices[0] != "mps" else torch.device(list_devices[1])
         )
         
-    if param_general.get("meas_reduce_memory_usage", None):
-        param_measop["meas_reduce_memory_usage"] = param_general["meas_reduce_memory_usage"]
+    if param_general.get("nufft_group_size", None):
+        param_measop["nufft_group_size"] = param_general["nufft_group_size"]
     else:
-        param_measop["meas_reduce_memory_usage"] = False
+        param_measop["nufft_group_size"] = None
         
     if param_general.get("prox_device", None) and param_general["prox_device"] in list_devices:
         param_proxop["device"] = torch.device(param_general["prox_device"])
