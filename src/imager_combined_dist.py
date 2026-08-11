@@ -175,7 +175,7 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
     }
     w_stack_data = process_device_global(
         0, device, local_data_for_wstack, param_measop,
-        metadata["fov_radians"], metadata["num_wstacks"], w_center,
+        metadata["fov_radians"], metadata["num_wstacks"], w_center, rank=rank
     )
     gc.collect()
     torch.cuda.empty_cache()

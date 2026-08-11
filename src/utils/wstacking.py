@@ -36,7 +36,7 @@ def get_n_term(
     m_grid = m_grid * dm_grid
     return torch.sqrt(1 - l_grid**2 - m_grid**2).reshape(1, 1, *img_size)
 
-def process_device_global(d, dev, data, param_measop, fov_radians, num_wstacks, w_center):
+def process_device_global(d, dev, data, param_measop, fov_radians, num_wstacks, w_center, rank=None):
 
     data_i = {
         "u": data["u_dev"][d],
@@ -60,23 +60,26 @@ def process_device_global(d, dev, data, param_measop, fov_radians, num_wstacks, 
             for i in range(num_wstacks)
         ]
     
-    plan_pairs = None
-    group_size = param_measop["nufft_group_size"]
-    if group_size is None:
-        group_size = 1
-    if num_wstacks > 1 and group_size > 1:
-        n_groups = math.ceil(num_wstacks / group_size)
-        print(f"INFO: Created {n_groups} SharedNUFFTPlanPairs (grouping every {group_size} stacks).", flush=True)
-        plan_pairs = [
-            SharedNUFFTPlanPair(param_measop["img_size"], param_measop["dtype"], dev)
-            for _ in range(n_groups)
-        ]
+    plan_pair = None
+    num_plans = param_measop["nufft_num_plans"]
+    if num_plans is None or num_plans >= num_wstacks:
+        num_plans = num_wstacks
+        if rank == 0:
+            print("INFO: No plan sharing. Each stack gets a dedicated plan.", flush=True)
+            print(f"INFO: Created {num_plans} individual NUFFT plans.", flush=True)
     else:
-        print("INFO: No plan sharing (group_size = 1). Each stack gets a dedicated plan.", flush=True)
+        plan_pair = SharedNUFFTPlanPair(param_measop["img_size"], param_measop["dtype"], dev)
+        if rank == 0:
+            print(f"INFO: Created {num_plans} individual and one shared NUFFT plan.", flush=True)
         
     meas_op = [None] * num_wstacks
+    if num_plans == 0:
+        individual_plan_indices = set()
+    else:
+        stride = num_wstacks / num_plans
+        individual_plan_indices = {int(round(i * stride)) for i in range(num_plans)}
+    
     for i in range(num_wstacks):
-        plan_pair = plan_pairs[i // group_size] if plan_pairs is not None else None
         u_stack = data_i["u"] if num_wstacks == 1 else data_i["u"][:, :, w_stack_idx == i]
         v_stack = data_i["v"] if num_wstacks == 1 else data_i["v"][:, :, w_stack_idx == i]
         nW_stack = data_i["nW"] if num_wstacks == 1 else data_i["nW"][:, :, w_stack_idx == i]
@@ -90,7 +93,7 @@ def process_device_global(d, dev, data, param_measop, fov_radians, num_wstacks, 
             real_flag=True,
             dtype=param_measop["dtype"],
             device=dev,
-            shared_plan_pair=plan_pair,
+            shared_plan_pair=None if i in individual_plan_indices else plan_pair,
         )
 
     w_stack_data = {

@@ -240,10 +240,11 @@ def set_imaging_params_ri(
             torch.device(list_devices[0]) if list_devices[0] != "mps" else torch.device(list_devices[1])
         )
         
-    if param_general.get("nufft_group_size", None):
-        param_measop["nufft_group_size"] = param_general["nufft_group_size"]
+    nufft_num_plans = param_general.get("nufft_num_plans")
+    if nufft_num_plans in ("none", None):
+        param_measop["nufft_num_plans"] = None
     else:
-        param_measop["nufft_group_size"] = None
+        param_measop["nufft_num_plans"] = nufft_num_plans
         
     if param_general.get("prox_device", None) and param_general["prox_device"] in list_devices:
         param_proxop["device"] = torch.device(param_general["prox_device"])

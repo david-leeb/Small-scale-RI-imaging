@@ -207,7 +207,7 @@ def _dtype_label(dtype: torch.dtype) -> str:
     return {"torch.float32": "single", "torch.float64": "double"}.get(str(dtype), str(dtype))
 
 
-def print_latex_table(all_results, base_name: str = "ORIGINAL"):
+def print_latex_table2(all_results, base_name: str = "ORIGINAL"):
     """
     Prints `all_results` (from run_benchmark) as a LaTeX `tabular` body,
     one row per (image size, precision), with the baseline's time and one
@@ -244,6 +244,55 @@ def print_latex_table(all_results, base_name: str = "ORIGINAL"):
             if name in impls:
                 row.append(f"{impls[name]['mean_ms']:.3f}")
                 row.append(f"{impls[name]['speedup']:.2f}$\\times$")
+            else:
+                row.append("--")
+                row.append("--")
+        print(" & ".join(row) + r" \\")
+
+    print(r"\hline")
+    print(r"\end{tabular}")
+    
+def print_latex_table(all_results, base_name: str = "ORIGINAL"):
+    grouped = {}
+    for r in all_results:
+        key = (r["img_size"], r["dtype"])
+        grouped.setdefault(key, {})[r["impl"]] = r
+
+    impl_names = list(dict.fromkeys(r["impl"] for r in all_results))
+    non_base = [n for n in impl_names if n != base_name]
+
+    col_spec = "ll" + "r" * (1 + 2 * len(non_base))
+    print(r"\begin{tabular}{" + col_spec + "}")
+    print(r"\hline\hline")
+    
+    # Clean header construction avoiding nested f-string brace syntax errors
+    header = [
+        r"\begin{tabular}[b]{@{}l@{}}Image\\Size\end{tabular}", 
+        "Precision", 
+        r"\begin{tabular}[b]{@{}r@{}}" + base_name + r"\\(ms)\end{tabular}"
+    ]
+    for name in non_base:
+        header += [
+            r"\begin{tabular}[b]{@{}r@{}}" + name + r"\\(ms)\end{tabular}", 
+            r"\begin{tabular}[b]{@{}r@{}}" + name + r"\\Speedup\end{tabular}"
+        ]
+    print(" & ".join(header) + r" \\")
+    print(r"\hline")
+
+    for (img_size, dtype), impls in grouped.items():
+        if base_name not in impls:
+            continue
+        size_str = f"${img_size[0]}\\times{img_size[1]}$"
+        prec_str = _dtype_label(dtype)
+        
+        base_item = impls[base_name]
+        row = [size_str, prec_str, f"${base_item['mean_ms']:.3f} \\pm {base_item['std_ms']:.3f}$"]
+        
+        for name in non_base:
+            if name in impls:
+                item = impls[name]
+                row.append(f"${item['mean_ms']:.3f} \\pm {item['std_ms']:.3f}$")
+                row.append(f"{item['speedup']:.2f}$\\times$")
             else:
                 row.append("--")
                 row.append("--")
