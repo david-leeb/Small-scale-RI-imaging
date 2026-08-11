@@ -150,7 +150,8 @@ class ForwardBackward(Optimiser):
                             self._prox_op.set_noise_floor_level(_threshold) 
                             self._prox_op.set_soft_thresholding_value(_threshold)
                         else:
-                            assert("Not implemented")
+                            print("WARNING: Not implemented")
+                            return
 
                     x_hat = self._model - self._gd_step_size * res
                     x_hat = x_hat.to(device=self._prox_op.get_device(), dtype=self._prox_op.get_data_type())

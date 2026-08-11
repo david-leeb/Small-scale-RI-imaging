@@ -25,8 +25,6 @@ def is_root(rank: Optional[int] = None) -> bool:
 
 
 def assign_channels_striped(num_chs: int, world_size: int) -> list[list[int]]:
-    """Same striping as the original single-process code -- kept identical so
-    channel -> rank ownership matches on every rank without communication."""
     return [list(range(i, num_chs, world_size)) for i in range(world_size)]
 
 
@@ -72,13 +70,7 @@ def scatter_channel_data(
 ) -> dict:
     """Rank `src` holds the full CPU tensors in `data[key]` (shape (1,1,N)).
     Every rank ends up with `data[f"{key}_dev"]`, its own channel-based
-    slice, on `device` -- via point-to-point send/recv (see module
-    docstring for why not dist.scatter).
- 
-    Keys whose value is a single broadcastable scalar (e.g. nWimag == [1.0]
-    when data weighting is disabled -- see load_dataset) are detected
-    automatically and broadcast whole, matching the original single-process
-    code's `if full.numel() == 1` special case.
+    slice, on `device` -- via point-to-point send/recv
     """
     rank = dist.get_rank()
     world_size = dist.get_world_size()

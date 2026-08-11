@@ -19,7 +19,7 @@ spec:
       containers:
       - name: python-worker
         stdin: true
-        image: davidleeb24/mrop:v5
+        image: davidleeb24/mrop:v6
         imagePullPolicy: Always
         command: ["/bin/bash", "-c"]
         args:

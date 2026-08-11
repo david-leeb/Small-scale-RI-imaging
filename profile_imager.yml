@@ -19,7 +19,7 @@ spec:
       containers:
       - name: python-worker
         stdin: true
-        image: davidleeb24/mrop:v5
+        image: davidleeb24/mrop:v6
         imagePullPolicy: Always
         command: ["/bin/bash", "-c"]
         args:
@@ -37,7 +37,7 @@ spec:
             --cuda-memory-usage=true \
             --output="logs_profiling/nsys_mrop_${RUN_TIME}" \
             --force-overwrite=true \
-            python run_imager_combined.py -c "config/meerkat_debug_2.json" >> "$LOG_FILE" 2>&1
+            torchrun --nproc_per_node=4 run_imager_combined_dist.py -c "config/meerkat_debug.json" >> "$LOG_FILE" 2>&1
         resources:
           requests:
             cpu: 64

@@ -50,6 +50,9 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
     """
     
     is_root = rank == 0
+    if param_measop["nfreqs"] < world_size:
+        print("Warning: Number of channels has to be larger than number of GPUs")  # Optional
+        return
     
     # Add reconstruction method to file prefix
     use_ROP = param_measop["use_ROP"]
@@ -165,8 +168,6 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
         del data["u"], data["v"], data["w"], data["y"]
         gc.collect()
  
-    mem("after data scatter")
- 
     local_data_for_wstack = {
         "u_dev": [data["u_dev"]], "v_dev": [data["v_dev"]],
         "nW_dev": [data["nW_dev"]], "nWimag_dev": [data["nWimag_dev"]],
@@ -222,7 +223,8 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
                 verbose=param_proxop["verbose"],
             )
         else:
-            assert("For now only uSARA is implemented.")
+            print("For now only uSARA is implemented.")
+            return
     torch.cuda.empty_cache()
     
     optimiser = FBSARADist(
