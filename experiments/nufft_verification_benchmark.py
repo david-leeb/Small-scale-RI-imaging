@@ -558,12 +558,12 @@ if __name__ == "__main__":
 
     with open(log_path, "w") as log_file, contextlib.redirect_stdout(_Tee(sys.stdout, log_file)):
 
-        eu = benchmark_eps_upsampfac(
-            uv_source="real",
-            real_uv_path="meerkat_4096_220ch_1gpu_uvstacks.pt",
-        )
-        print("\n--- eps/upsampfac LaTeX table ---\n")
-        print_eps_upsampfac_table(eu)
+        # eu = benchmark_eps_upsampfac(
+        #     uv_source="real",
+        #     real_uv_path="meerkat_4096_220ch_1gpu_uvstacks.pt",
+        # )
+        # print("\n--- eps/upsampfac LaTeX table ---\n")
+        # print_eps_upsampfac_table(eu)
 
         # gm = benchmark_gpu_method_kerevalmeth(uv_source="real", real_uv_path="meerkat_4096_220ch_1gpu_uvstacks.pt")
         # print("\n--- gpu_method/gpu_kerevalmeth LaTeX table ---\n")

@@ -28,7 +28,7 @@ scaling, bearing this coupling in mind.
 USAGE (fill in --data_file and the PLACEHOLDER fields in __main__ first):
 
     # Strong scaling (fixed nfreqs, increasing GPU count)
-    for W in 1 2 4; do
+    for W in 1 2 4 8; do
         torchrun --nproc_per_node=$W mrop_multigpu_benchmark.py --scaling_mode strong
     done
 
@@ -348,7 +348,6 @@ if __name__ == "__main__":
     parser.add_argument("--scaling_mode", type=str, choices=["strong", "weak"], required=True)
     parser.add_argument("--n_iters", type=int, default=50)
     parser.add_argument("--n_warmup", type=int, default=10)
-    parser.add_argument("--use_ROP", action="store_true")
     parser.add_argument("--results_file", type=str, default="mrop_multigpu_results.jsonl")
     args = parser.parse_args()
 
@@ -356,13 +355,13 @@ if __name__ == "__main__":
 
     param_optimiser = {"data_file": "../data/meerkat"}
     param_measop = {
-        "nfreqs": 160,
-        "use_ROP": args.use_ROP,
+        "nfreqs": 120,
+        "use_ROP": True,
         "img_size": (4096, 4096),        # PLACEHOLDER -- your real config
         "Q": 59,                        # PLACEHOLDER
         "superresolution": [],           # PLACEHOLDER
         "im_pixel_size": 1.68,            # PLACEHOLDER
-        "freq_num": 0,                    # PLACEHOLDER
+        "freq_num": 50,                    # PLACEHOLDER
         "flag_data_weighting": True,      # PLACEHOLDER
         "weight_type": "briggs",          # PLACEHOLDER
         "weight_robustness": 0.0,         # PLACEHOLDER
@@ -373,7 +372,7 @@ if __name__ == "__main__":
         "nufft_num_plans": None,         # PLACEHOLDER -- see process_device_global
         "ROP_param": {                    # PLACEHOLDER, only used if --use_ROP
             "Q": None, "B": None, "N_ratio": 1.0, "epsilon_n": 1.0,
-            "rv_type": "unitary", "ROP_seed": 0, "ROP_type": "MROP",
+            "rv_type": "unitary", "ROP_seed": 0, "ROP_type": "MROP", "weight_type": "briggs",
         },
     }
 
