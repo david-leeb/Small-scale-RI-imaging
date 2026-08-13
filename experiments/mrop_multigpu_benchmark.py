@@ -353,15 +353,15 @@ if __name__ == "__main__":
 
     rank, world_size, device = setup_distributed()
 
-    param_optimiser = {"data_file": "../data/meerkat"}
-    param_measop = {
-        "nfreqs": 120,
-        "use_ROP": True,
+    param_optimiser_meerkat = {"data_file": "../data/meerkat"}
+    param_measop_meerkat = {
+        "nfreqs": 100,
+        "use_ROP": False,
         "img_size": (4096, 4096),        # PLACEHOLDER -- your real config
         "Q": 59,                        # PLACEHOLDER
         "superresolution": [],           # PLACEHOLDER
         "im_pixel_size": 1.68,            # PLACEHOLDER
-        "freq_num": 50,                    # PLACEHOLDER
+        "freq_num": 60,                    # PLACEHOLDER
         "flag_data_weighting": True,      # PLACEHOLDER
         "weight_type": "briggs",          # PLACEHOLDER
         "weight_robustness": 0.0,         # PLACEHOLDER
@@ -375,9 +375,32 @@ if __name__ == "__main__":
             "rv_type": "unitary", "ROP_seed": 0, "ROP_type": "MROP", "weight_type": "briggs",
         },
     }
+    
+    param_optimiser_3c273 = {"data_file": "../data/273-X08-dmog"}
+    param_measop_3c273 = {
+        "nfreqs": 64,
+        "use_ROP": False,
+        "img_size": (1024, 1024),        # PLACEHOLDER -- your real config
+        "Q": 27,                        # PLACEHOLDER
+        "superresolution": 1.87,           # PLACEHOLDER
+        "im_pixel_size": None,            # PLACEHOLDER
+        "freq_num": 0,                    # PLACEHOLDER
+        "flag_data_weighting": False,      # PLACEHOLDER
+        "weight_type": "natural",          # PLACEHOLDER
+        "weight_robustness": 0.0,         # PLACEHOLDER
+        "vis_remove": 17.7,               # PLACEHOLDER
+        "dl_shift": 0.0,                  # PLACEHOLDER
+        "dm_shift": 0.0,                  # PLACEHOLDER
+        "dtype": torch.float32,           # PLACEHOLDER
+        "nufft_num_plans": None,         # PLACEHOLDER -- see process_device_global
+        "ROP_param": {                    # PLACEHOLDER, only used if --use_ROP
+            "Q": None, "B": None, "N_ratio": 1.0, "epsilon_n": 1.0,
+            "rv_type": "unitary", "ROP_seed": 0, "ROP_type": "MROP", "weight_type": "natural",
+        },
+    }
 
     run_benchmark(
-        param_optimiser, param_measop, rank, world_size, device,
+        param_optimiser_meerkat, param_measop_meerkat, rank, world_size, device,
         n_iters=args.n_iters, n_warmup=args.n_warmup,
         scaling_mode=args.scaling_mode, results_file=args.results_file,
     )
