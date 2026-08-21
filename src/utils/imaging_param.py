@@ -162,7 +162,7 @@ def set_imaging_params_ri(
             param_measop["ROP_param"] = {"Q": param_general.get("ROP_Q", None)}
         else:
             param_measop["ROP_param"] = None
-    elif param_measop["ROP_type"] in ["MROP", "CROP", "MROP_gaussian"]:
+    elif param_measop["ROP_type"] in ["MROP", "CROP", "MROP_gaussian", "MROP_unitary"]:
         param_measop["use_ROP"] = True
         if "ROP_seed" not in param_general:
             try:

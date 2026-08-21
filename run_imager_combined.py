@@ -2,13 +2,18 @@
 Prepare input variables for imager
 """
 
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["TORCH_NCCL_SHOW_EAGER_INIT_P2P_SERIALIZATION_WARNING"] = "False"
+
 from typing import Any, Dict, Optional
 import argparse
 import json
+import torch
 
 from src.imager_combined import imager
 from src.utils import set_imaging_params_ri
-
+from src.utils.gpu_utils import setup_distributed, cleanup_distributed
 
 def parsing_arguments() -> argparse.Namespace:
     """
@@ -145,14 +150,18 @@ def print_dict(curr_dict: Dict[str, Any], flush: bool = True) -> None:
 
 
 if __name__ == "__main__":
+    
+    rank, world_size, device = setup_distributed()
+    torch.cuda.reset_peak_memory_stats()
+    
     input_args = parsing_arguments()
     param_general = parsing_parameters(input_args.config, input_param=input_args)
-    if param_general.get("verbose", True):
+    if param_general.get("verbose", True) and rank == 0:
         print("Input parameters", flush=True)
         print(json.dumps(param_general, indent=4), flush=True)
 
     param_measop, param_proxop, param_optimiser = set_imaging_params_ri(param_general)
-    if param_optimiser["verbose"]:
+    if param_optimiser["verbose"] and rank == 0:
         print(
             "________________________________________________________________\n",
             flush=True,
@@ -172,5 +181,5 @@ if __name__ == "__main__":
             flush=True,
         )
         
-
-    imager(param_optimiser, param_measop, param_proxop)
+    imager(param_optimiser, param_measop, param_proxop, rank, world_size, device)
+    cleanup_distributed()
