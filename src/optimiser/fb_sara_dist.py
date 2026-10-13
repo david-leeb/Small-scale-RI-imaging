@@ -13,9 +13,8 @@ from astropy.io import fits
 from .forward_backward_dist import ForwardBackward
 from ..prox_operator import ProxOpSARAPos
 from ..ri_measurement_operator.pysrc.measOperator import MeasOpNUFFT
-from ..ri_measurement_operator.pysrc.measOperator.meas_op_PSF import (
-    MeasOpPSF,
-)
+from ..ri_measurement_operator.pysrc.measOperator.meas_op_PSF import MeasOpPSF
+from ..utils.gpu_utils import broadcast_object
 
 
 class FBSARADist(ForwardBackward):
@@ -157,31 +156,33 @@ class FBSARADist(ForwardBackward):
                             flush=True,
                         )
         
-        if is_root:     
-            # set noise floor level in wavelet domain
-            self._prox_op.set_noise_floor_level(self._heuristic / 3.0)  # 9 wavelet bases
-            if self._verbose:
+        # if is_root:     
+        # set noise floor level in wavelet domain
+        self._heuristic = broadcast_object(self._heuristic if is_root else None, src=0)
+        self._prox_op.set_noise_floor_level(self._heuristic / 3.0)  # 9 wavelet bases
+        if is_root and self._verbose:
+            print(
+                f"INFO: estimated noise floor level in wavelet coefficients: {self._heuristic/3.0}"
+            )
+            
+        if not np.isclose(self._heu_reg_scale, 1.0):
+            self._heuristic *= self._heu_reg_scale
+            if is_root and self._verbose:
                 print(
-                    f"INFO: estimated noise floor level in wavelet coefficients: {self._heuristic/3.0}"
+                    f"INFO: heuristic noise level after scaling: {self._heuristic},",
+                    f"scaling factor {self._heu_reg_scale}",
+                    flush=True,
                 )
                 
-            if not np.isclose(self._heu_reg_scale, 1.0):
-                self._heuristic *= self._heu_reg_scale
-                if self._verbose:
-                    print(
-                        f"INFO: heuristic noise level after scaling: {self._heuristic},",
-                        f"scaling factor {self._heu_reg_scale}",
-                        flush=True,
-                    )
-                    
-            # set soft thresholding value
-            self._prox_op.set_soft_thresholding_value(
-                self._heuristic / 3.0
-            )  # 9 wavelet bases
+        # set soft thresholding value
+        self._prox_op.set_soft_thresholding_value(
+            self._heuristic / 3.0
+        )  # 9 wavelet bases
 
-            # initialise weighting for the l1 norm
-            self._prox_op.update(self._model, initialisation=True)
+        # initialise weighting for the l1 norm
+        self._prox_op.update(self._model, initialisation=True)
 
+        if is_root:
             # other parameters
             self._model_prev_re = self._model
             self._iter_inner = 0

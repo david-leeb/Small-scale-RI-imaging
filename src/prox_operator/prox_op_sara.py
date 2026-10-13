@@ -5,6 +5,7 @@ import ptwt
 import nvtx
 import pywt
 import warnings
+import torch.distributed as dist
 
 from .prox_op import ProxOp
 from .wavelets_custom import (
@@ -33,6 +34,16 @@ def _fused_1d_dual_update(dual_1d, psit_1d, weights_1d, sfth_val, norm_acc):
 
 WaveletCoeff = List[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]
 WaveletDictCoeff = List[Union[WaveletCoeff, torch.Tensor]]
+
+def assign_bases(bases, world_size):
+    cost = {b: (1 if b == "dirac" else pywt.Wavelet(b).dec_len) for b in bases}
+    load = [0] * world_size
+    owned = [[] for _ in range(world_size)]
+    for b in sorted(bases, key=lambda b: -cost[b]):
+        r = min(range(world_size), key=lambda i: load[i])
+        owned[r].append(b)
+        load[r] += cost[b]
+    return owned
         
 class ProxOpSARAPos(ProxOp):
     """
@@ -53,6 +64,8 @@ class ProxOpSARAPos(ProxOp):
         obj_tol: float = 1e-4,
         device: torch.device = torch.device("cuda"),
         dtype: torch.dtype = torch.float,
+        rank: int = 0,
+        world_size: int = 1,
         verbose: bool = True,
     ) -> None:
         assert device.type == "cuda", "ProxOpSARAPos requires a CUDA device."
@@ -64,7 +77,14 @@ class ProxOpSARAPos(ProxOp):
         self._wl_noise_floor = wl_noise_floor
         self._mode = mode
         self._scale_factor = float(np.sqrt(len(wl_dict)))
-        self._wl_dict = list(wl_dict)
+        self._distributed = world_size > 1
+        if self._distributed:
+            assert world_size <= len(wl_dict), "need at least one basis per rank"
+            my_bases = assign_bases(list(wl_dict), world_size)[rank]
+        else:
+            my_bases = list(wl_dict)
+        self._wl_dict = [b for b in wl_dict if b in my_bases]   # keep the original order
+        # self._wl_dict = list(wl_dict)
         self._dirac = "dirac" in self._wl_dict
         self._verbose = verbose
         self._weights: WaveletDictCoeff = []
@@ -122,6 +142,7 @@ class ProxOpSARAPos(ProxOp):
 
         # CUDA graph
         self._graph: torch.cuda.CUDAGraph | None = None
+        self._graph_upd: torch.cuda.CUDAGraph | None = None
 
     def _wavedec2_dict(self, x: torch.Tensor) -> WaveletDictCoeff:
         """
@@ -169,19 +190,73 @@ class ProxOpSARAPos(ProxOp):
             self._norm_l1,
         )
 
+    def _iteration_rec(self) -> None:
+        """
+        Reconstruction from the local dual variables (partial sum over the local bases).
+        """
+        self._waverec2_dict_into(self._dual)
+ 
+    def _iteration_upd(self) -> None:
+        """
+        Primal update from the (summed) reconstruction, then dual update of the local bases.
+        """
+        _primal_update_inplace(self._result, self._x_buf, self._recon)
+ 
+        # Accumulate l2 norm
+        _compute_norm_l2(self._norm_l2, self._result, self._x_buf)
+ 
+        # Dual update
+        self._sfth_dual(self._wavedec2_dict(self._result))
+ 
     def _iteration(self) -> None:
         """
         One prox sub-iteration.
         """
-        # Primal update
-        self._waverec2_dict_into(self._dual)
-        _primal_update_inplace(self._result, self._x_buf, self._recon)
+        self._graph.replay()
+        if self._distributed:
+            dist.all_reduce(self._recon)       # sum of the partial reconstructions
+        self._graph_upd.replay()
+        if self._distributed:
+            dist.all_reduce(self._norm_l1)     # sum of the local l1 norms
 
-        # Accumulate l2 norm
-        _compute_norm_l2(self._norm_l2, self._result, self._x_buf)
+    # def _iteration(self) -> None:
+    #     """
+    #     One prox sub-iteration.
+    #     """
+    #     # Primal update
+    #     self._waverec2_dict_into(self._dual)
+    #     _primal_update_inplace(self._result, self._x_buf, self._recon)
 
-        # Dual update
-        self._sfth_dual(self._wavedec2_dict(self._result))
+    #     # Accumulate l2 norm
+    #     _compute_norm_l2(self._norm_l2, self._result, self._x_buf)
+
+    #     # Dual update
+    #     self._sfth_dual(self._wavedec2_dict(self._result))
+
+    # def _capture_graph(self) -> None:
+    #     """
+    #     Warm up then capture one call to _iteration() as a CUDA graph.
+    #     """
+        
+    #     dual_backup = self._dual_1d.clone()
+        
+    #     # Warm-up
+    #     for _ in range(3):
+    #         self._iteration()
+
+    #     self._norm_l2.zero_()
+    #     self._norm_l1.zero_()
+    #     torch.cuda.synchronize(self._device)
+
+    #     # Capture
+    #     self._graph = torch.cuda.CUDAGraph()
+    #     with torch.cuda.graph(self._graph):
+    #         self._iteration()
+        
+    #     self._dual_1d.copy_(dual_backup)
+        
+    #     if self._verbose:
+    #         print("  CUDA graph captured.", flush=True)
 
     def _capture_graph(self) -> None:
         """
@@ -190,18 +265,22 @@ class ProxOpSARAPos(ProxOp):
         
         dual_backup = self._dual_1d.clone()
         
-        # Warm-up
+        # Warm-up (local only, values are discarded)
         for _ in range(3):
-            self._iteration()
-
+            self._iteration_rec()
+            self._iteration_upd()
+ 
         self._norm_l2.zero_()
         self._norm_l1.zero_()
         torch.cuda.synchronize(self._device)
-
+ 
         # Capture
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph):
-            self._iteration()
+            self._iteration_rec()
+        self._graph_upd = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._graph_upd):
+            self._iteration_upd()
         
         self._dual_1d.copy_(dual_backup)
         
@@ -216,7 +295,11 @@ class ProxOpSARAPos(ProxOp):
         # if not self._weights:
         #     raise RuntimeError("Call update() before __call__() to initialise weights.")
 
-        self._x_buf.copy_(x)
+        # self._x_buf.copy_(x)
+        if x is not None:
+            self._x_buf.copy_(x)
+        if self._distributed:
+            dist.broadcast(self._x_buf, src=0)
 
         if self._graph is None:
             self._capture_graph()
@@ -226,8 +309,8 @@ class ProxOpSARAPos(ProxOp):
         obj_val_prev = -1
         for i in range(self._max_iter):
             with nvtx.annotate("Prox_Subiteration"):
-                self._graph.replay()
-                # self._iteration()
+                # self._graph.replay()
+                self._iteration()
                 obj_val = 0.5 * self._norm_l2.item() + self._sfth_val * self._norm_l1.item()
                 obj_rel_var = abs(obj_val - obj_val_prev) / obj_val
                 obj_val_prev = obj_val

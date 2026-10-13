@@ -172,11 +172,13 @@ class ForwardBackward(Optimiser):
                     else:
                         self._t_backward = timer()
                         
-                    self._model = self._prox_op(x_hat)
-                    
-                    self._model = self._model.to(device=self._meas_op.get_device()).to(
-                        dtype=self._meas_op.get_data_type()
-                    )
+                    # self._model = self._prox_op(x_hat)
+                self._model = self._prox_op(x_hat if is_root else None)
+                self._model = self._model.to(device=self._meas_op.get_device()).to(
+                    dtype=self._meas_op.get_data_type()
+                )
+
+                if is_root:
                     if self._backward_cuda_timing:
                         backward_end_event.record()
                         torch.cuda.synchronize()
@@ -205,6 +207,8 @@ class ForwardBackward(Optimiser):
                 if is_root:
                     self._each_iter_end(residual)
                     self._model_prev = self._model
+                elif reweighting_now:
+                    self._prox_op.update(self._model)
 
         if is_root:
             self._t_total = timer() - self._t_total

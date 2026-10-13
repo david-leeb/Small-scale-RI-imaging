@@ -220,18 +220,17 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
     gc.collect()
     torch.cuda.empty_cache()
 
-    prox_op_sara = None
-    if is_root:
-        if param_optimiser["algorithm"] == "usara":
-            prox_op_sara = ProxOpSARAPos(
-                param_measop["img_size"],
-                device=param_proxop["device"],
-                dtype=param_proxop["dtype"],
-                verbose=param_proxop["verbose"],
-            )
-        else:
-            print("For now only uSARA is implemented.")
-            return
+    if param_optimiser["algorithm"] != "usara":
+        print("For now only uSARA is implemented.")
+        return
+    prox_op_sara = ProxOpSARAPos(
+        param_measop["img_size"],
+        device=param_proxop["device"],
+        dtype=param_proxop["dtype"],
+        verbose=param_proxop["verbose"] and is_root,
+        rank=rank,
+        world_size=world_size,
+    )
     torch.cuda.empty_cache()
     
     optimiser = FBSARADist(
