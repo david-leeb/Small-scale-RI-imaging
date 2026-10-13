@@ -113,3 +113,54 @@ def scatter_channel_data(
  
     data["N_vis_dev"] = n_local
     return data
+
+
+def scatter_wstack_data(
+    data: dict,
+    keys: list[str],
+    vis_exchange,
+    device: torch.device,
+    dtypes: dict,
+    src: int = 0,
+) -> dict:
+    """Like scatter_channel_data, but every rank receives its w-layout slice
+    data[key][..., w_ids[rank]] as data[f"{key}_dev"]. vis_exchange.w_ids is only
+    set on root; the local size comes from vis_exchange.N_vis_w.
+    """
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    n_local = vis_exchange.N_vis_w
+ 
+    is_scalar = {key: data[key].numel() == 1 for key in keys} if rank == src else None
+    is_scalar = broadcast_object(is_scalar, src=src)
+ 
+    for key in keys:
+        dtype = dtypes[key]
+ 
+        if is_scalar[key]:
+            if rank == src:
+                val = data[key].to(device=device, dtype=dtype).reshape(1, 1, 1)
+            else:
+                val = torch.empty((1, 1, 1), dtype=dtype, device=device)
+            dist.broadcast(val, src=src)
+            data[f"{key}_dev"] = val
+            continue
+ 
+        if rank == src:
+            full = data[key].reshape(-1)
+            out = None
+            for r in range(world_size):
+                chunk = full[vis_exchange.w_ids[r]].to(device=device, dtype=dtype)
+                if r == src:
+                    out = chunk
+                elif chunk.numel() > 0:
+                    send_tensor(chunk, dst=r)
+        elif n_local > 0:
+            out = recv_tensor(n_local, dtype, device, src=src)
+        else:
+            out = torch.empty(0, dtype=dtype, device=device)
+ 
+        data[f"{key}_dev"] = out.view(1, 1, n_local)
+ 
+    data["N_vis_w_dev"] = n_local
+    return data

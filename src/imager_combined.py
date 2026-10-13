@@ -12,15 +12,16 @@ from astropy.io import fits
 from .prox_operator import ProxOpSARAPos
 from .optimiser import FBSARADist
 from .utils.io_combined import load_dataset
-from .utils.wstacking import compute_global_w_stacking, process_device_global
+from .utils.wstacking import compute_global_w_stacking, process_device_global, wstack_cache_path
 from .mrop_ri_measurement_operator.src.utils.solve_epsilon_new import solve_epsilon_same_aa
 from .ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft
 from .mrop_ri_measurement_operator import weighting_correction
 
 from .utils.gpu_utils import (
     mem, broadcast_object,
-    scatter_channel_data, assign_channels_striped
+    scatter_channel_data, assign_channels_striped, scatter_wstack_data
 )
+from .utils.vis_exchange import build_vis_exchange
 
 #! Crucial to avoid underflow for single precision
 torch.backends.cudnn.allow_tf32 = False
@@ -123,7 +124,11 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
             torch.cuda.empty_cache()
     
         data["y"] = data["y"] * data["nW"] * data["nWimag"]    
-        data = compute_global_w_stacking(data, param_measop)
+        cache_path = None
+        if param_measop.get("wstack_cache", True):
+            cache_path = wstack_cache_path(param_optimiser["data_file"], param_measop, data["image_pixel_size"])
+        data = compute_global_w_stacking(data, param_measop, cache_path=cache_path)
+        # data = compute_global_w_stacking(data, param_measop)
         
         # Needed on every device
         metadata = dict(
@@ -150,33 +155,34 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
     channel_lists = assign_channels_striped(metadata["nFreqs"], world_size)
     
     w_center = torch.tensor(metadata["w_center"], dtype=param_measop["dtype"], device=device)
+
+    # Distribute w-stacks across ranks ("auto": only if every rank gets at least 2 stacks)
+    wstack_partition = param_measop.get("wstack_partition", "auto") #! add config param
+    if wstack_partition == "auto":
+        wstack_partition = metadata["num_wstacks"] >= 2 * world_size
+    data = data if is_root else {}
+    vis_exchange = build_vis_exchange(
+        data["stack_idx"] if is_root else None, metadata["chan_offsets"], channel_lists,
+        metadata["num_wstacks"], device, wstack=wstack_partition,
+        stack_cost=param_measop.get("wstack_cost", None),
+    )
  
     complex_dtype = torch.complex128 if param_measop["dtype"] == torch.float64 else torch.complex64
     dtypes = {
-        "u": param_measop["dtype"], "v": param_measop["dtype"], "w": param_measop["dtype"],
+        "u": param_measop["dtype"], "v": param_measop["dtype"],
         "nW": param_measop["dtype"], "nWimag": param_measop["dtype"],
-        "y": complex_dtype, "stack_idx": torch.int32,
+        "y": complex_dtype,
     }
-    scatter_keys = ["u", "v", "w", "nW", "y", "nWimag", "stack_idx"]
-    data = data if is_root else {}
-    data = scatter_channel_data(
-        data, scatter_keys, channel_lists, metadata["chan_offsets"], device, dtypes, src=0
-    )
+    data = scatter_wstack_data(data, ["u", "v", "nW", "nWimag"], vis_exchange, device, dtypes, src=0)
+    data = scatter_channel_data(data, ["y"], channel_lists, metadata["chan_offsets"], device, dtypes, src=0)
     torch.cuda.empty_cache()
  
     if is_root:
-        del data["u"], data["v"], data["w"], data["y"]
+        del data["u"], data["v"], data["w"], data["y"], data["stack_idx"]
+        vis_exchange.w_ids = None
         gc.collect()
  
-    local_data_for_wstack = {
-        "u_dev": [data["u_dev"]], "v_dev": [data["v_dev"]],
-        "nW_dev": [data["nW_dev"]], "nWimag_dev": [data["nWimag_dev"]],
-        "stack_idx_dev": [data["stack_idx_dev"]],
-    }
-    w_stack_data = process_device_global(
-        0, device, local_data_for_wstack, param_measop,
-        metadata["fov_radians"], metadata["num_wstacks"], w_center, rank=rank
-    )
+    w_stack_data = process_device_global(device, data, param_measop, metadata["fov_radians"], w_center, vis_exchange, rank=rank)
     gc.collect()
     torch.cuda.empty_cache()
     
@@ -185,6 +191,7 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
     meas_op = nufft_op(
         img_size=param_measop["img_size"],
         w_stack_data=w_stack_data,
+        vis_exchange=vis_exchange,
         num_chs=metadata["nFreqs"],
         rank=rank,
         world_size=world_size,
@@ -208,7 +215,7 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
         if is_root:
             param_optimiser["file_prefix"] += f"cr_{compression_ratio:.2f}_"
             
-    del data["u_dev"], data["v_dev"], data["w_dev"], data["nW_dev"], data["nWimag_dev"], data["y_dev"]
+    del data["u_dev"], data["v_dev"], data["nW_dev"], data["nWimag_dev"], data["y_dev"]
 
     gc.collect()
     torch.cuda.empty_cache()

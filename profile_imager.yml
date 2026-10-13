@@ -34,10 +34,12 @@ spec:
           echo -e "\n=== Starting Profiling: MROP Config ===" >> "$LOG_FILE" 2>&1
           nsys profile \
             --trace=cuda,nvtx \
+            --sample=none \
+            --cpuctxsw=none \
             --cuda-memory-usage=true \
             --output="logs_profiling/nsys_mrop_${RUN_TIME}" \
             --force-overwrite=true \
-            torchrun --nproc_per_node=4 run_imager_combined_dist.py -c "config/meerkat_debug.json" >> "$LOG_FILE" 2>&1
+            torchrun --nproc_per_node=4 run_imager_combined.py -c "config/meerkat_debug.json" >> "$LOG_FILE" 2>&1
         resources:
           requests:
             cpu: 64

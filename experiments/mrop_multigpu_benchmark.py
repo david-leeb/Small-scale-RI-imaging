@@ -25,22 +25,34 @@ mechanism. --use_ROP defaults to off (classical model) for the cleanest
 read on scaling behaviour; pass it to also characterise RAPHA's own
 scaling, bearing this coupling in mind.
 
-USAGE (fill in --data_file and the PLACEHOLDER fields in __main__ first):
+USAGE (fill in the PLACEHOLDER fields in __main__ first):
 
-    # Strong scaling (fixed nfreqs, increasing GPU count)
+    # Strong scaling, three configurations of the measurement operator:
     for W in 1 2 4 8; do
+        # old partition, one shared plan per GPU (setup used in the dissertation runs)
+        torchrun --nproc_per_node=$W mrop_multigpu_benchmark.py --scaling_mode strong \\
+            --wstack_partition false --nufft_num_plans 0
+        # old partition, one dedicated plan per stack
+        torchrun --nproc_per_node=$W mrop_multigpu_benchmark.py --scaling_mode strong \\
+            --wstack_partition false
+        # w-stacks distributed across GPUs, dedicated plans
         torchrun --nproc_per_node=$W mrop_multigpu_benchmark.py --scaling_mode strong
     done
+    # add --use_ROP to any of these for the MROP model
 
     # Weak scaling (nfreqs scales with GPU count, e.g. 55 channels/GPU)
     for W in 1 2 4; do
-        NFREQS=$((55 * W))
-        torchrun --nproc_per_node=$W mrop_multigpu_benchmark.py \\
-            --data_file /path/to/dataset --nfreqs $NFREQS --scaling_mode weak
+        torchrun --nproc_per_node=$W mrop_multigpu_benchmark.py --nfreqs $((55 * W)) --scaling_mode weak
     done
 
     # After all runs complete (no GPU needed):
     python -c "from mrop_multigpu_benchmark import print_scaling_tables; print_scaling_tables()"
+
+With --wstack_partition auto (default) the w-stack partition is only used if
+num_wstacks >= 2 * world_size, so for narrow-field data (3C 273, one stack)
+the run falls back to the channel partition; the "partition" field in each
+result records what was actually used. At W=1 both partitions are identical
+(all stacks on one GPU, no communication).
 
 Import paths below are copied directly from imager.py's own relative
 imports, converted to absolute -- adjust if this script lives somewhere
@@ -67,9 +79,10 @@ from src.utils.wstacking import compute_global_w_stacking, process_device_global
 from src.mrop_ri_measurement_operator.src.utils.solve_epsilon_new import solve_epsilon_same_aa
 from src.ri_measurement_operator.pysrc.measOperator.meas_op_nufft_pytorch_finufft import MeasOpPytorchFinufft
 from src.mrop_ri_measurement_operator import weighting_correction
-from src.mrop_ri_measurement_operator.src.mrop_dist import create_meas_op_ROP_dist
-from src.utils.gpu_utils_dist import (
-    broadcast_object, scatter_channel_data, assign_channels_striped,
+from src.mrop_ri_measurement_operator.src.mrop import create_meas_op_ROP
+from src.utils.vis_exchange import build_vis_exchange
+from src.utils.gpu_utils import (
+    broadcast_object, scatter_wstack_data, assign_channels_striped,
     setup_distributed, cleanup_distributed,
 )
 
@@ -173,39 +186,42 @@ def build_measurement_operator(param_optimiser: Dict, param_measop: Dict,
     channel_lists = assign_channels_striped(metadata["nFreqs"], world_size)
     w_center = torch.tensor(metadata["w_center"], dtype=param_measop["dtype"], device=device)
 
-    complex_dtype = torch.complex128 if param_measop["dtype"] == torch.float64 else torch.complex64
-    dtypes = {
-        "u": param_measop["dtype"], "v": param_measop["dtype"], "w": param_measop["dtype"],
-        "nW": param_measop["dtype"], "nWimag": param_measop["dtype"],
-        "y": complex_dtype, "stack_idx": torch.int32,
-    }
-    scatter_keys = ["u", "v", "w", "nW", "y", "nWimag", "stack_idx"]
+    # Same as imager(): distribute w-stacks ("auto": only if every rank gets >= 2 stacks)
+    wstack_partition = param_measop.get("wstack_partition", "auto")
+    if wstack_partition == "auto":
+        wstack_partition = metadata["num_wstacks"] >= 2 * world_size
+    param_measop["wstack_partition_used"] = bool(wstack_partition)   # recorded in the results
     data = data if is_root else {}
-    data = scatter_channel_data(
-        data, scatter_keys, channel_lists, metadata["chan_offsets"], device, dtypes, src=0
+    vis_exchange = build_vis_exchange(
+        data["stack_idx"] if is_root else None, metadata["chan_offsets"], channel_lists,
+        metadata["num_wstacks"], device, wstack=wstack_partition,
+        stack_cost=param_measop.get("wstack_cost", None),
     )
+
+    dtypes = {
+        "u": param_measop["dtype"], "v": param_measop["dtype"],
+        "nW": param_measop["dtype"], "nWimag": param_measop["dtype"],
+    }
+    # NUFFT inputs in w-layout. y is not scattered: forward_adjoint_op never uses it.
+    data = scatter_wstack_data(data, ["u", "v", "nW", "nWimag"], vis_exchange, device, dtypes, src=0)
     torch.cuda.empty_cache()
 
     if is_root:
-        del data["u"], data["v"], data["w"], data["y"]
+        del data["u"], data["v"], data["w"], data["y"], data["stack_idx"]
+        vis_exchange.w_ids = None
         gc.collect()
 
-    local_data_for_wstack = {
-        "u_dev": [data["u_dev"]], "v_dev": [data["v_dev"]],
-        "nW_dev": [data["nW_dev"]], "nWimag_dev": [data["nWimag_dev"]],
-        "stack_idx_dev": [data["stack_idx_dev"]],
-    }
     w_stack_data = process_device_global(
-        0, device, local_data_for_wstack, param_measop,
-        metadata["fov_radians"], metadata["num_wstacks"], w_center, rank=rank,
+        device, data, param_measop, metadata["fov_radians"], w_center, vis_exchange, rank=rank,
     )
     gc.collect()
     torch.cuda.empty_cache()
 
-    nufft_op = create_meas_op_ROP_dist(MeasOpPytorchFinufft)
+    nufft_op = create_meas_op_ROP(MeasOpPytorchFinufft)
     meas_op = nufft_op(
         img_size=param_measop["img_size"],
         w_stack_data=w_stack_data,
+        vis_exchange=vis_exchange,
         num_chs=metadata["nFreqs"],
         rank=rank,
         world_size=world_size,
@@ -278,31 +294,42 @@ def run_benchmark(param_optimiser: Dict, param_measop: Dict, rank: int, world_si
             "world_size": world_size,
             "nfreqs": param_measop["nfreqs"],
             "use_ROP": param_measop["use_ROP"],
+            "partition": "wstack" if param_measop["wstack_partition_used"] else "channel",
+            "nufft_num_plans": param_measop["nufft_num_plans"],
             "mean_ms": mean_ms,
             "std_ms": std_ms,
             "driver_mem_gb_rank0": driver_mem_gb,
             "timestamp": datetime.datetime.now().isoformat(),
         }
         print(f"\n=== [{scaling_mode}] world_size={world_size}, nfreqs={param_measop['nfreqs']}, "
-              f"use_ROP={param_measop['use_ROP']} ===")
+              f"use_ROP={param_measop['use_ROP']}, partition={result['partition']}, "
+              f"nufft_num_plans={param_measop['nufft_num_plans']} ===")
         print(f"  {mean_ms:.4f} ms (std {std_ms:.4f})  driver_mem(rank0)={driver_mem_gb:.3f} GB")
 
         with open(results_file, "a") as f:
             f.write(json.dumps(result) + "\n")
 
 
+def _config_label(r) -> str:
+    """Runs from before the w-stack change have no 'partition' key."""
+    model = "MROP" if r["use_ROP"] else "classical"
+    plans = r.get("nufft_num_plans", "?")
+    plans = "dedicated" if plans is None else f"{plans} plans"
+    return f"{model}, {r.get('partition', 'channel (old code)')}, {plans}"
+
+
 def print_scaling_tables(results_file: str = "mrop_multigpu_results.jsonl") -> None:
     """
     Reads the accumulated results file (written by run_benchmark across
     potentially many separate torchrun invocations at different
-    world_size) and prints strong- and weak-scaling LaTeX tables. No GPU
-    needed -- run this after all torchrun launches have completed.
+    world_size) and prints strong- and weak-scaling LaTeX tables, one per
+    configuration (model, partition, plan sharing, and nfreqs for strong
+    scaling), so runs of different implementations are never mixed.
 
-    Strong scaling: speedup relative to the smallest world_size present.
-    Weak scaling: raw time only, no speedup column -- ideal weak scaling
-    is a FLAT time as world_size (and nfreqs) grow together, not a
-    speedup, so read this as "how close to constant" rather than
-    "how much faster".
+    Strong scaling: speedup relative to the smallest world_size present,
+    plus a least-squares fit T(W) = a + b/W (a: part that does not scale,
+    b: part that does).
+    Weak scaling: raw time only -- ideal weak scaling is a FLAT time.
     """
     results = []
     with open(results_file) as f:
@@ -311,34 +338,43 @@ def print_scaling_tables(results_file: str = "mrop_multigpu_results.jsonl") -> N
             if line:
                 results.append(json.loads(line))
 
-    strong = sorted([r for r in results if r["scaling_mode"] == "strong"], key=lambda r: r["world_size"])
-    weak = sorted([r for r in results if r["scaling_mode"] == "weak"], key=lambda r: r["world_size"])
+    groups = {}
+    for r in results:
+        key = (r["scaling_mode"], _config_label(r), r["nfreqs"] if r["scaling_mode"] == "strong" else None)
+        groups.setdefault(key, []).append(r)
 
-    if strong:
-        base_ms = strong[0]["mean_ms"]
-        print("\n--- Strong scaling LaTeX table ---\n")
-        print(r"\begin{tabular}{rrrr}")
-        print(r"\hline\hline")
-        print(r"GPUs & \texttt{nfreqs} & Time (ms) & Speedup \\")
-        print(r"\hline")
-        for r in strong:
-            speedup = base_ms / r["mean_ms"]
-            print(f"{r['world_size']} & {r['nfreqs']} & "
-                  f"${r['mean_ms']:.3f} \\pm {r['std_ms']:.3f}$ & {speedup:.2f}$\\times$ \\\\")
-        print(r"\hline")
-        print(r"\end{tabular}")
-
-    if weak:
-        print("\n--- Weak scaling LaTeX table ---\n")
-        print(r"\begin{tabular}{rrr}")
-        print(r"\hline\hline")
-        print(r"GPUs & \texttt{nfreqs} & Time (ms) \\")
-        print(r"\hline")
-        for r in weak:
-            print(f"{r['world_size']} & {r['nfreqs']} & "
-                  f"${r['mean_ms']:.3f} \\pm {r['std_ms']:.3f}$ \\\\")
-        print(r"\hline")
-        print(r"\end{tabular}")
+    for (mode, label, nfreqs), runs in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] or 0)):
+        runs = sorted(runs, key=lambda r: r["world_size"])
+        if mode == "strong":
+            base_ms = runs[0]["mean_ms"]
+            print(f"\n--- Strong scaling: {label}, nfreqs={nfreqs} ---\n")
+            print(r"\begin{tabular}{rrrrr}")
+            print(r"\hline\hline")
+            print(r"GPUs & Time (ms) & Speedup & Efficiency & Mem. rank 0 (GB) \\")
+            print(r"\hline")
+            for r in runs:
+                speedup = base_ms / r["mean_ms"]
+                eff = 100 * speedup * runs[0]["world_size"] / r["world_size"]
+                print(f"{r['world_size']} & ${r['mean_ms']:.3f} \\pm {r['std_ms']:.3f}$ & "
+                      f"{speedup:.2f}$\\times$ & {eff:.1f}\\% & {r['driver_mem_gb_rank0']:.1f} \\\\")
+            print(r"\hline")
+            print(r"\end{tabular}")
+            if len(runs) >= 2:
+                W = np.array([r["world_size"] for r in runs], dtype=float)
+                T = np.array([r["mean_ms"] for r in runs])
+                b, a = np.polyfit(1.0 / W, T, 1)
+                print(f"% fit T(W) = a + b/W:  a = {a:.1f} ms (does not scale),  b = {b:.1f} ms (scales)")
+        else:
+            print(f"\n--- Weak scaling: {label} ---\n")
+            print(r"\begin{tabular}{rrr}")
+            print(r"\hline\hline")
+            print(r"GPUs & \texttt{nfreqs} & Time (ms) \\")
+            print(r"\hline")
+            for r in runs:
+                print(f"{r['world_size']} & {r['nfreqs']} & "
+                      f"${r['mean_ms']:.3f} \\pm {r['std_ms']:.3f}$ \\\\")
+            print(r"\hline")
+            print(r"\end{tabular}")
 
 
 if __name__ == "__main__":
@@ -349,6 +385,12 @@ if __name__ == "__main__":
     parser.add_argument("--n_iters", type=int, default=50)
     parser.add_argument("--n_warmup", type=int, default=10)
     parser.add_argument("--results_file", type=str, default="mrop_multigpu_results.jsonl")
+    parser.add_argument("--nfreqs", type=int, default=None, help="overrides the config (weak scaling)")
+    parser.add_argument("--use_ROP", action="store_true")
+    parser.add_argument("--wstack_partition", type=str, choices=["auto", "true", "false"], default="auto",
+                        help="false = old channel partition (all stacks on every GPU)")
+    parser.add_argument("--nufft_num_plans", type=int, default=None,
+                        help="number of dedicated plans per GPU; omit for one plan per stack, 0 = one shared plan")
     args = parser.parse_args()
 
     rank, world_size, device = setup_distributed()
@@ -356,7 +398,7 @@ if __name__ == "__main__":
     param_optimiser_meerkat = {"data_file": "../data/meerkat"}
     param_measop_meerkat = {
         "nfreqs": 100,
-        "use_ROP": False,
+        "use_ROP": True,
         "img_size": (4096, 4096),        # PLACEHOLDER -- your real config
         "Q": 59,                        # PLACEHOLDER
         "superresolution": [],           # PLACEHOLDER
@@ -399,8 +441,15 @@ if __name__ == "__main__":
         },
     }
 
+    param_optimiser, param_measop = param_optimiser_meerkat, param_measop_meerkat
+    if args.nfreqs is not None:
+        param_measop["nfreqs"] = args.nfreqs
+    param_measop["use_ROP"] = args.use_ROP
+    param_measop["wstack_partition"] = {"auto": "auto", "true": True, "false": False}[args.wstack_partition]
+    param_measop["nufft_num_plans"] = args.nufft_num_plans
+
     run_benchmark(
-        param_optimiser_meerkat, param_measop_meerkat, rank, world_size, device,
+        param_optimiser, param_measop, rank, world_size, device,
         n_iters=args.n_iters, n_warmup=args.n_warmup,
         scaling_mode=args.scaling_mode, results_file=args.results_file,
     )
