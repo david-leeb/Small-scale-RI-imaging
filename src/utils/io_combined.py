@@ -4,6 +4,8 @@ import gc
 import os
 import re
 import glob
+import json
+import shutil
 from scipy.io import loadmat
 from scipy.constants import speed_of_light
 from multiprocessing import Pool, cpu_count
@@ -60,6 +62,118 @@ def _find_channel_files(data_path):
 
     return channel_files
 
+_CACHE_VERSION = 1
+_CACHE_KEYS = ["u", "v", "w", "nW", "y", "ant1", "ant2", "batches"]
+
+def _source_files(data_path, freq_num, nfreqs):
+    """msSpecs.mat and the channel files of the selected range (used for cache validation)."""
+    channel_files = _find_channel_files(data_path)
+    files = [os.path.join(data_path, "msSpecs.mat")]
+    files += [channel_files[c] for c in range(freq_num, freq_num + nfreqs) if c in channel_files]
+    return files
+ 
+ 
+def _fingerprint(files):
+    """Staleness check: size and modification time of every source file."""
+    return {os.path.basename(f): [os.path.getsize(f), os.path.getmtime(f)] for f in files}
+
+
+def _load_raw(data_path, Q, nfreqs, freq_num, num_workers=None):
+    """
+    Reads the .mat files of the selected channels and concatenates them.
+    Everything returned here only depends on (data_path, freq_num, nfreqs, Q).
+    """
+    msSpecs = loadmat(os.path.join(data_path, "msSpecs.mat"))
+    freqs = msSpecs["freqs"].squeeze()[freq_num : freq_num + nfreqs]
+    num_channels = freqs.size
+ 
+    print(
+        f"INFO: Frequency range: {freqs.min()/1e6:.4f} MHz to {freqs.max()/1e6:.4f} MHz "
+        f"({num_channels} channels).",
+        flush=True,
+    )
+ 
+    channel_files = _find_channel_files(data_path)
+ 
+    workers = num_workers or min(cpu_count(), num_channels)
+    channel_args = [
+        (freq_num + i, speed_of_light / freqs[i], channel_files[freq_num + i], data_path, Q)
+        for i in range(num_channels)
+    ]
+    with Pool(workers) as pool:
+        results = list(tqdm(
+            pool.imap(_load_channel, channel_args),
+            total=num_channels, desc="Loading channels",
+        ))
+ 
+    # Filter out None results and concatenate
+    channel_results = [r for r in results if r is not None]
+    num_channels = len(channel_results)
+    if num_channels == 0:
+        raise ValueError("No valid data found in any channel")
+ 
+    B_per_ch = int(max(r["batches"].max() for r in channel_results if r["batches"].size) + 1)
+    raw = {
+        "u": np.concatenate([r["u"] for r in channel_results]),
+        "v": np.concatenate([r["v"] for r in channel_results]),
+        "w": np.concatenate([r["w"] for r in channel_results]),
+        "nW": np.concatenate([r["nW"] for r in channel_results]),
+        "y": np.concatenate([r["data"] for r in channel_results]),
+        # antenna and batch indices are small integers: store them compactly (lossless)
+        "ant1": np.concatenate([r["ant1"] for r in channel_results]).astype(np.int16),
+        "ant2": np.concatenate([r["ant2"] for r in channel_results]).astype(np.int16),
+        "batches": np.concatenate(
+            [r["batches"] + B_per_ch * i for i, r in enumerate(channel_results)]
+        ).astype(np.int32),
+    }
+    meta = {
+        "num_channels": num_channels,
+        "B_per_ch": B_per_ch,
+        "chan_offsets": np.concatenate([[0], np.cumsum([r["n_vis"] for r in channel_results])]).tolist(),
+    }
+    return raw, meta
+ 
+ 
+def data_cache_path(data_path, freq_num, nfreqs, Q, cache_dir="data_cache"):
+    dataset = os.path.basename(os.path.normpath(data_path))
+    return os.path.join(cache_dir, f"{dataset}_ch{freq_num}-{freq_num + nfreqs - 1}_Q{Q}")
+ 
+ 
+def _load_raw_cached(data_path, Q, nfreqs, freq_num, num_workers=None, cache_dir="data_cache"):
+    """_load_raw with an on-disk cache: one .npy file per array plus meta.json."""
+    if cache_dir is None:
+        return _load_raw(data_path, Q, nfreqs, freq_num, num_workers)
+ 
+    path = data_cache_path(data_path, freq_num, nfreqs, Q, cache_dir)
+    fingerprint = _fingerprint(_source_files(data_path, freq_num, nfreqs))
+ 
+    meta_file = os.path.join(path, "meta.json")
+    if os.path.exists(meta_file):
+        with open(meta_file) as f:
+            meta = json.load(f)
+        if meta.get("version") == _CACHE_VERSION and meta.get("sources") == fingerprint:
+            print(f"INFO: Loading cached data from {path}.", flush=True)
+            raw = {k: np.load(os.path.join(path, f"{k}.npy")) for k in _CACHE_KEYS}
+            return raw, meta
+        print(f"WARNING: data cache {path} is outdated, reloading from .mat files.", flush=True)
+ 
+    raw, meta = _load_raw(data_path, Q, nfreqs, freq_num, num_workers)
+    meta.update(version=_CACHE_VERSION, sources=fingerprint)
+ 
+    # write into a temporary directory and rename it: a crashed run never leaves a broken cache
+    tmp_path = f"{path}.tmp{os.getpid()}"
+    os.makedirs(tmp_path, exist_ok=True)
+    for k in _CACHE_KEYS:
+        np.save(os.path.join(tmp_path, f"{k}.npy"), raw[k])
+    with open(os.path.join(tmp_path, "meta.json"), "w") as f:
+        json.dump(meta, f)
+    if os.path.exists(path):
+        shutil.rmtree(path)
+    os.replace(tmp_path, path)
+    print(f"INFO: Saved data cache to {path}.", flush=True)
+    return raw, meta
+
+
 def load_dataset(
     data_path: str,
     Q: int,
@@ -77,58 +191,21 @@ def load_dataset(
     dtype: torch.dtype = torch.float64,
     device: torch.device = torch.device("cpu"),
     num_workers: int = None,
+    cache_dir: str = "data_cache",
 ):
 
-    msSpecs = loadmat(os.path.join(data_path, "msSpecs.mat"))
-    freqs = msSpecs["freqs"].squeeze()[freq_num : freq_num + nfreqs]
-    num_channels = freqs.size
-    
-    print(
-        f"INFO: Frequency range: {freqs.min()/1e6:.4f} MHz to {freqs.max()/1e6:.4f} MHz "
-        f"({num_channels} channels).",
-        flush=True,
-    )
-    
-    channel_files = _find_channel_files(data_path)
-    
-    workers = num_workers or min(cpu_count(), num_channels)
-    channel_args = [
-        (freq_num + i, speed_of_light / freqs[i], channel_files[freq_num + i], data_path, Q)
-        for i in range(num_channels)
-    ]
-    with Pool(workers) as pool:
-        results = list(tqdm(
-            pool.imap(_load_channel, channel_args),
-            total=num_channels, desc="Loading channels",
-        ))
-    
-    # Filter out None results and concatenate
-    channel_results = [r for r in results if r is not None]
-    
-    # Update channel count after filtering
-    num_channels = len(channel_results)
-    
-    if len(channel_results) == 0:
-        raise ValueError("No valid data found in any channel")
-    
-    u_cat = np.concatenate([r["u"] for r in channel_results])
-    v_cat = np.concatenate([r["v"] for r in channel_results])
-    w_cat = np.concatenate([r["w"] for r in channel_results])
-    nW_cat = np.concatenate([r["nW"] for r in channel_results])
-    y_cat = np.concatenate([r["data"] for r in channel_results])
-    B_per_ch = int(max(r["batches"].max() for r in channel_results if r["batches"].size) + 1)
-    batches_cat = np.concatenate([r["batches"] + B_per_ch * i for i, r in enumerate(channel_results)])
-    ant1_cat = np.concatenate([r["ant1"] for r in channel_results])
-    ant2_cat = np.concatenate([r["ant2"] for r in channel_results])
-    
-    chan_offsets = np.concatenate([[0], np.cumsum([r["n_vis"] for r in channel_results])])
-    
+    raw, meta = _load_raw_cached(data_path, Q, nfreqs, freq_num, num_workers, cache_dir)
+    u_cat, v_cat, w_cat, nW_cat, y_cat = raw["u"], raw["v"], raw["w"], raw["nW"], raw["y"]
+    ant1_cat, ant2_cat, batches_cat = raw["ant1"], raw["ant2"], raw["batches"]
+    num_channels = meta["num_channels"]
+    B_per_ch = meta["B_per_ch"]
+    chan_offsets = np.asarray(meta["chan_offsets"])
+    del raw
+ 
     print(
         f"INFO: Total number of visibilities: {y_cat.size}, with {num_channels} frequency channels ({freq_num} to {freq_num + num_channels - 1}).",
         flush=True,
     )
-    
-    del channel_results
 
     max_proj_baseline = np.max(np.sqrt(u_cat**2 + v_cat**2))
     data_dict = {}
@@ -158,9 +235,9 @@ def load_dataset(
     data_dict["w"] = -torch.tensor(w_cat, dtype=dtype, device=device).view(1, 1, -1)
     data_dict["nW"] = torch.tensor(nW_cat, dtype=dtype, device=device).view(1, 1, -1)
     data_dict["y"] = torch.tensor(y_cat, dtype=c_dtype, device=device).view(1, 1, -1)
-    data_dict["ant1"] = torch.tensor(ant1_cat, device=device)
-    data_dict["ant2"] = torch.tensor(ant2_cat, device=device)
-    data_dict["batches"] = torch.tensor(batches_cat, device=device)
+    data_dict["ant1"] = torch.tensor(ant1_cat, dtype=torch.long, device=device)
+    data_dict["ant2"] = torch.tensor(ant2_cat, dtype=torch.long, device=device)
+    data_dict["batches"] = torch.tensor(batches_cat, dtype=torch.long, device=device)
     data_dict["Q"] = Q
     data_dict["B"] = B_per_ch * num_channels
     data_dict["B_per_ch"] = B_per_ch

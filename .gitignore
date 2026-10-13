@@ -12,6 +12,8 @@ Thumbs.db
 
 # General
 logs/
+data_cache
+wstacks
 *.log
 *.err
 *.out
