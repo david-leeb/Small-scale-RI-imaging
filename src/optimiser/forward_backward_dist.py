@@ -93,12 +93,12 @@ class ForwardBackward(Optimiser):
         
         if is_root:
             fits.writeto(
-                os.path.join(self._save_pth, "dirty.fits"),
+                os.path.join(self._save_pth, self._file_prefix + "dirty.fits"),
                 self.get_dirty_image() / self._psf_peak,
                 overwrite=True,
             )
             fits.writeto(
-                os.path.join(self._save_pth, "psf.fits"),
+                os.path.join(self._save_pth, self._file_prefix + "psf.fits"),
                 self.get_psf(),
                 overwrite=True,
             )

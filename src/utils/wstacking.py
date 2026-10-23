@@ -44,15 +44,20 @@ def process_device_global(dev, data, param_measop, fov_radians, w_center, vis_ex
     w_center = w_center.to(dev)
     
     # Create w-stacking correction term
-    n_term = get_n_term(param_measop["img_size"], fov_radians, dev, param_measop["dtype"])
+    n_term = get_n_term(param_measop["img_size"], fov_radians, dev, torch.float64)
+    n_minus_1 = -(1 - n_term ** 2) / (1 + n_term)
 
     # Precompute per-stack w-corrections if w-stacking is needed
     complex_dtype = torch.complex128 if param_measop["dtype"] == torch.float64 else torch.complex64
     if w_center.numel() == 1:
         w_stack_correct = [torch.ones(1, 1, *param_measop["img_size"], dtype=complex_dtype, device=dev) for _ in stack_list]
     else:
+        # w_stack_correct = [
+        #     torch.exp(-2j * torch.pi * w_center[k] * (n_term - 1)) / n_term
+        #     for k in stack_list
+        # ]
         w_stack_correct = [
-            torch.exp(-2j * torch.pi * w_center[k] * (n_term - 1)) / n_term
+            (torch.exp(-2j * torch.pi * w_center[k].double() * n_minus_1) / n_term).to(complex_dtype)
             for k in stack_list
         ]
     
@@ -198,12 +203,16 @@ def compute_global_w_stacking(data, param_measop, cache_path=None):
 
         if cache_path is not None:
             _save_wstack_cache(cache_path, centers, w, num_wstacks)
-    
-    w_flat = w.ravel()
-    idx_right = np.clip(np.searchsorted(centers, w_flat), 0, len(centers) - 1)
-    idx_left = np.clip(idx_right - 1, 0, len(centers) - 1)
-    choose_right = np.abs(w_flat - centers[idx_right]) < np.abs(w_flat - centers[idx_left])
-    labels = np.where(choose_right, idx_right, idx_left)
+
+    dev = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
+    w_t = torch.from_numpy(w.ravel()).to(dev, torch.float64)
+    c_t = torch.from_numpy(np.asarray(centers, dtype=np.float64)).to(dev)
+    idx_right = torch.searchsorted(c_t, w_t).clamp_(0, len(centers) - 1)
+    idx_left = (idx_right - 1).clamp_(min=0)
+    choose_right = (w_t - c_t[idx_right]).abs() < (w_t - c_t[idx_left]).abs()
+    labels = torch.where(choose_right, idx_right, idx_left).to(torch.int32).cpu()
+    del w_t, c_t, idx_right, idx_left, choose_right
+    torch.cuda.empty_cache()
 
     print("INFO: w-stacking centers: ", end="")
     for i in range(num_wstacks):

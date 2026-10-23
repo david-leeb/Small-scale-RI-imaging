@@ -25,9 +25,9 @@ def assign_wstacks(n_vis_per_stack, world_size, stack_cost=None):
     return [sorted(s) for s in stack_lists]
 
 
-def plan_vis_exchange(stack_idx, chan_offsets, channel_lists, num_wstacks, wstack=True, stack_cost=None):
+def plan_vis_exchange(stack_idx, chan_offsets, channel_lists, num_wstacks, wstack=True, stack_cost=None, device=torch.device("cpu")):
     """
-    Root only, CPU tensors. Builds the mapping between the two layouts:
+    Builds the mapping between the two layouts:
 
     ch-layout: rank r holds the channels channel_lists[r] (same order as
                scatter_channel_data). Used by y and MROP.
@@ -43,23 +43,23 @@ def plan_vis_exchange(stack_idx, chan_offsets, channel_lists, num_wstacks, wstac
         stack_lists / stack_offsets: local stacks and their slices in the w-layout
     """
     world_size = len(channel_lists)
-    stack_idx = stack_idx.view(-1).long()
+    stack_idx = stack_idx.view(-1).to(device=device, dtype=torch.long)
     n_vis = stack_idx.numel()
 
     # ch-layout
     ch_ids = [
-        torch.cat([torch.arange(chan_offsets[c], chan_offsets[c + 1]) for c in cl])
-        if cl else torch.empty(0, dtype=torch.long)
+        torch.cat([torch.arange(chan_offsets[c], chan_offsets[c + 1], device=device) for c in cl])
+        if cl else torch.empty(0, dtype=torch.long, device=device)
         for cl in channel_lists
     ]
-    ch_owner = torch.empty(n_vis, dtype=torch.long)
+    ch_owner = torch.empty(n_vis, dtype=torch.long, device=device)
     for r in range(world_size):
         ch_owner[ch_ids[r]] = r
 
     # w-layout
     if wstack:
-        stack_lists = assign_wstacks(torch.bincount(stack_idx, minlength=num_wstacks), world_size, stack_cost)
-        stack_owner = torch.empty(num_wstacks, dtype=torch.long)
+        stack_lists = assign_wstacks(torch.bincount(stack_idx, minlength=num_wstacks).cpu(), world_size, stack_cost)
+        stack_owner = torch.empty(num_wstacks, dtype=torch.long, device=device)
         for r, ks in enumerate(stack_lists):
             stack_owner[ks] = r
         w_owner = stack_owner[stack_idx]
@@ -70,9 +70,10 @@ def plan_vis_exchange(stack_idx, chan_offsets, channel_lists, num_wstacks, wstac
         w_owner = ch_owner
         w_ids = [ids[torch.argsort(stack_idx[ids], stable=True)] for ids in ch_ids]
 
-    w_pos = torch.empty(n_vis, dtype=torch.long)
+    w_pos = torch.empty(n_vis, dtype=torch.long, device=device)
     for r in range(world_size):
-        w_pos[w_ids[r]] = torch.arange(w_ids[r].numel())
+        w_pos[w_ids[r]] = torch.arange(w_ids[r].numel(), device=device)
+
 
     # all-to-all ordering: each chunk src -> dst is sorted by the w position on dst
     send_idx, recv_idx, stack_offsets = [], [], []
@@ -80,15 +81,15 @@ def plan_vis_exchange(stack_idx, chan_offsets, channel_lists, num_wstacks, wstac
     for r in range(world_size):
         dst = w_owner[ch_ids[r]]
         send_idx.append(torch.argsort(dst * n_vis + w_pos[ch_ids[r]]))
-        counts[r] = torch.bincount(dst, minlength=world_size)
+        counts[r] = torch.bincount(dst, minlength=world_size).cpu()
 
         recv_idx.append(torch.argsort(ch_owner[w_ids[r]], stable=True))
 
-        n_local = torch.bincount(stack_idx[w_ids[r]], minlength=num_wstacks)[stack_lists[r]]
+        n_local = torch.bincount(stack_idx[w_ids[r]], minlength=num_wstacks).cpu()[stack_lists[r]]
         stack_offsets.append([0] + torch.cumsum(n_local, 0).tolist())
 
     return dict(
-        ch_ids=ch_ids, w_ids=w_ids, send_idx=send_idx, recv_idx=recv_idx,
+        ch_ids=ch_ids, w_ids=[ids.cpu() for ids in w_ids], send_idx=send_idx, recv_idx=recv_idx,
         counts=counts, stack_lists=stack_lists, stack_offsets=stack_offsets,
     )
 
@@ -154,7 +155,7 @@ def build_vis_exchange(stack_idx, chan_offsets, channel_lists, num_wstacks, devi
     plan = None
     meta = None
     if rank == src:
-        plan = plan_vis_exchange(stack_idx, chan_offsets, channel_lists, num_wstacks, wstack, stack_cost)
+        plan = plan_vis_exchange(stack_idx, chan_offsets, channel_lists, num_wstacks, wstack, stack_cost, device)
         meta = dict(counts=plan["counts"], stack_lists=plan["stack_lists"], stack_offsets=plan["stack_offsets"])
     meta = broadcast_object(meta, src=src)
     counts = meta["counts"]

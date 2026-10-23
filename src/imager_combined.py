@@ -27,6 +27,8 @@ from .utils.vis_exchange import build_vis_exchange
 torch.backends.cudnn.allow_tf32 = False
 torch.backends.cuda.matmul.allow_tf32 = False
 
+torch.backends.cudnn.benchmark = True
+
 def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: int, world_size: int, device: torch.device) -> None:
     """
     Imager for small scale RI imaging task.

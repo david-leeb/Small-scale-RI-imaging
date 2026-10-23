@@ -266,14 +266,16 @@ def load_dataset(
 
         # compute imaging weights accordingly to the specified weighting scheme
         print("INFO: computing imaging weights...", flush=True)
+        wdev = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else device
         data_dict["nWimag"] = gen_imaging_weights(
-            data_dict["u"].clone(),
-            data_dict["v"].clone(),
-            data_dict["nW"],
+            data_dict["u"].to(wdev),
+            data_dict["v"].to(wdev),
+            data_dict["nW"].to(wdev),
             img_size,
             weight_type=weight_type,
             weight_robustness=weight_robustness,
         ).numpy(force=True)
+        torch.cuda.empty_cache()
     else:
         print("INFO: imaging weights will not be applied.", flush=True)
         data_dict["nWimag"] = [1.0]
