@@ -12,6 +12,7 @@ Thumbs.db
 
 # General
 logs/
+experiments
 data_cache
 wstacks
 *.log

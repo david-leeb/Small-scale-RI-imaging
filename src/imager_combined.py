@@ -125,7 +125,21 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
             data, weight_corr = weighting_correction(data, param_measop["ROP_param"], rapha=True)
             torch.cuda.empty_cache()
     
-        data["y"] = data["y"] * data["nW"] * data["nWimag"]    
+        data["y"] = data["y"] * data["nW"] * data["nWimag"]
+
+        # power-law sky spectrum: the operator predicts x * (nu/nu0)^alpha per channel; the data stay unchanged
+        if param_measop.get("spectral_index", None) is not None:
+            from .utils.io_combined import loaded_channel_freqs
+            freqs = loaded_channel_freqs(param_optimiser["data_file"], param_measop["freq_num"], param_measop["nfreqs"])
+            assert freqs.size == int(data["nFreqs"]), "channel frequencies do not match the loaded channels"
+            nu0 = float(freqs.mean())
+            counts = np.diff(np.asarray(data["chan_offsets"]))
+            alpha = float(param_measop["spectral_index"])
+            scale = torch.as_tensor(np.repeat((freqs / nu0) ** alpha, counts), dtype=data["nW"].dtype).view(1, 1, -1)
+            data["nW"] = data["nW"] * scale
+            print(f"INFO: power-law sky spectrum alpha={alpha}, nu0={nu0 / 1e6:.3f} MHz "
+                  f"(scale {scale.min().item():.3f}..{scale.max().item():.3f})", flush=True)
+
         cache_path = None
         if param_measop.get("wstack_cache", True):
             cache_path = wstack_cache_path(param_optimiser["data_file"], param_measop, data["image_pixel_size"])

@@ -106,6 +106,7 @@ def set_imaging_params_ri(
         param_measop["weight_gridsize"] = float(param_general["weight_gridsize"])
     else:
         param_measop["weight_gridsize"] = 2
+    param_measop["spectral_index"] = param_general.get("spectral_index", None)
 
     # nufft settings
     # package

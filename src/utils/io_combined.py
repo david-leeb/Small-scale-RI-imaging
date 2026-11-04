@@ -119,7 +119,6 @@ def _load_raw(data_path, Q, nfreqs, freq_num, num_workers=None):
         "w": np.concatenate([r["w"] for r in channel_results]),
         "nW": np.concatenate([r["nW"] for r in channel_results]),
         "y": np.concatenate([r["data"] for r in channel_results]),
-        # antenna and batch indices are small integers: store them compactly (lossless)
         "ant1": np.concatenate([r["ant1"] for r in channel_results]).astype(np.int16),
         "ant2": np.concatenate([r["ant2"] for r in channel_results]).astype(np.int16),
         "batches": np.concatenate(
@@ -173,6 +172,17 @@ def _load_raw_cached(data_path, Q, nfreqs, freq_num, num_workers=None, cache_dir
     print(f"INFO: Saved data cache to {path}.", flush=True)
     return raw, meta
 
+def loaded_channel_freqs(data_path, freq_num, nfreqs):
+    """Frequencies (Hz) of the channels load_dataset keeps (channel files with empty data are dropped)."""
+    from scipy.io import whosmat
+    freqs = loadmat(os.path.join(data_path, "msSpecs.mat"))["freqs"].squeeze()[freq_num: freq_num + nfreqs]
+    files = _find_channel_files(data_path)
+    keep = []
+    for i, f in enumerate(freqs):
+        shapes = {name: shape for name, shape, _ in whosmat(files[freq_num + i])}
+        if 0 not in shapes.get("data_I", (0,)):
+            keep.append(float(f))
+    return np.asarray(keep)
 
 def load_dataset(
     data_path: str,
