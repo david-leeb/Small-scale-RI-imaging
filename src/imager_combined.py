@@ -134,11 +134,16 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
             assert freqs.size == int(data["nFreqs"]), "channel frequencies do not match the loaded channels"
             nu0 = float(freqs.mean())
             counts = np.diff(np.asarray(data["chan_offsets"]))
-            alpha = float(param_measop["spectral_index"])
-            scale = torch.as_tensor(np.repeat((freqs / nu0) ** alpha, counts), dtype=data["nW"].dtype).view(1, 1, -1)
-            data["nW"] = data["nW"] * scale
-            print(f"INFO: power-law sky spectrum alpha={alpha}, nu0={nu0 / 1e6:.3f} MHz "
-                  f"(scale {scale.min().item():.3f}..{scale.max().item():.3f})", flush=True)
+            if param_measop["spectral_index"] == "auto":
+                # log(nu/nu0) per visibility; alpha is fitted after a short pilot reconstruction
+                data["logf"] = torch.as_tensor(np.repeat(np.log(freqs / nu0), counts), dtype=data["nW"].dtype).view(1, 1, -1)
+                print(f"INFO: power-law sky spectrum, alpha fitted from a pilot run, nu0={nu0 / 1e6:.3f} MHz", flush=True)
+            else:
+                alpha = float(param_measop["spectral_index"])
+                scale = torch.as_tensor(np.repeat((freqs / nu0) ** alpha, counts), dtype=data["nW"].dtype).view(1, 1, -1)
+                data["nW"] = data["nW"] * scale
+                print(f"INFO: power-law sky spectrum alpha={alpha}, nu0={nu0 / 1e6:.3f} MHz "
+                    f"(scale {scale.min().item():.3f}..{scale.max().item():.3f})", flush=True)
 
         cache_path = None
         if param_measop.get("wstack_cache", True):
@@ -189,12 +194,17 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
         "nW": param_measop["dtype"], "nWimag": param_measop["dtype"],
         "y": complex_dtype,
     }
-    data = scatter_wstack_data(data, ["u", "v", "nW", "nWimag"], vis_exchange, device, dtypes, src=0)
+    spectral_auto = param_measop.get("spectral_index", None) == "auto"
+    w_keys = ["u", "v", "nW", "nWimag"] + (["logf"] if spectral_auto else [])
+    if spectral_auto:
+        dtypes["logf"] = param_measop["dtype"]
+    data = scatter_wstack_data(data, w_keys, vis_exchange, device, dtypes, src=0)
     data = scatter_channel_data(data, ["y"], channel_lists, metadata["chan_offsets"], device, dtypes, src=0)
     torch.cuda.empty_cache()
  
     if is_root:
         del data["u"], data["v"], data["w"], data["y"], data["stack_idx"]
+        data.pop("logf", None)
         vis_exchange.w_ids = None
         gc.collect()
  
@@ -232,7 +242,8 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
             param_optimiser["file_prefix"] += f"cr_{compression_ratio:.2f}_"
             
     del data["u_dev"], data["v_dev"], data["nW_dev"], data["nWimag_dev"], data["y_dev"]
-
+    data.pop("logf_dev", None)
+    w_stack_data.pop("logf", None)
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -248,11 +259,9 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
         world_size=world_size,
     )
     torch.cuda.empty_cache()
-    
-    optimiser = FBSARADist(
-        y_compressed if use_ROP else y_local.view(1, 1, -1),
-        meas_op,
-        prox_op_sara,
+
+    fb_args = (y_compressed if use_ROP else y_local.view(1, 1, -1), meas_op, prox_op_sara)
+    fb_kwargs = dict(
         rank=rank,
         use_ROP=use_ROP,
         y_uncompressed=y_local.view(1, 1, -1) if use_ROP else None,
@@ -267,8 +276,25 @@ def imager(param_optimiser: Dict, param_measop: Dict, param_proxop: Dict, rank: 
         save_pth=param_optimiser["result_path"],
         file_prefix=param_optimiser["file_prefix"],
         reweight_save=param_optimiser["reweighting_save"],
-        verbose=param_optimiser["verbose"] and is_root,
-    )
+        verbose=param_optimiser["verbose"] and is_root
+    )   
+
+    if spectral_auto:
+        n_pilot = param_measop.get("spectral_pilot_itr", 100)
+        pilot = FBSARADist(*fb_args, **{**fb_kwargs, "im_min_itr": n_pilot, "im_max_itr": n_pilot,
+                                        "im_max_itr_outer": 1, "reweight_save": False, "verbose": False})
+        pilot.initialisation()
+        pilot.run()
+        x = pilot._model if is_root else torch.empty(1, 1, *param_measop["img_size"], dtype=meas_op._dtype, device=device)
+        alpha = meas_op.fit_spectral_index(x.to(dtype=meas_op._dtype), fb_args[0])
+        meas_op.set_spectral_index(alpha)
+        prox_op_sara._dual_1d.zero_()          # the prox warm-starts from its dual; start clean
+        del pilot, x
+        gc.collect(); torch.cuda.empty_cache()
+        if is_root:
+            print(f"INFO: spectral index fitted on a {n_pilot}-iteration pilot: alpha = {alpha:.3f}", flush=True)
+
+    optimiser = FBSARADist(*fb_args, **fb_kwargs)
     torch.cuda.empty_cache()
 
     # imaging

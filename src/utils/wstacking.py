@@ -103,6 +103,7 @@ def process_device_global(dev, data, param_measop, fov_radians, w_center, vis_ex
         "stack_list": stack_list,
         "meas_op": meas_op,
         "plan_pair": plan_pair,
+        "logf": data["logf_dev"].view(-1) if "logf_dev" in data else None,
     }
     
     return w_stack_data
